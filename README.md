@@ -138,7 +138,7 @@ loops split across "functions" by outgoing branches recurse on the C++ stack.
 Build and run (needs clang++ 16+ and Python 3):
 ```
 python -I tools/build.py          # regenerate (only changed files rewritten), compile, link -> build/dante.exe
-build/dante.exe                   # options: --game <dump root>  --trace  --dump-after <seconds>
+build/dante.exe                   # finds the game dump by itself; options: --game <dump root> --trace --dump-after <s>
 ```
 The first build compiles all 54 generated files (~10 min with 8 jobs); after
 that, runtime/HLE changes rebuild in seconds.
@@ -168,9 +168,29 @@ Lessons: MinGW's emulated `thread_local` is unreliable here - use the Win32
 TLS slot (`current_thread()`); HLE import calls must store r2 at 0x28(r1)
 like the real import stub, because callers reload the TOC from there.
 
+## SPU emulation
+
+```
+tools/spu_isa.py            SPU instruction table (199 opcodes) -> disassembler + generated C++ decoder
+runtime/spu/spu_interp.cpp  interpreter (128 x 128-bit registers, 256 KB local store)
+runtime/spu/spu_channels.cpp channels: MFC DMA (single + list), GETLLAR/PUTLLC/PUTLLUC reservations,
+                            mailboxes, signal notification, events (incl. lost-reservation), decrementer,
+                            SPU -> PPU events (sys_spu_thread_send_event / throw_event), stop codes
+runtime/spu/spu_lv2.cpp     syscalls 169-192 (thread groups, initialize/start/join, LS access, mailbox,
+                            SNR, event ports) and sys_spu_image_import
+tests/spu_tests.py          35 SPU programs assembled in Python and checked against hand-computed results
+```
+Disassemble an embedded SPU image: `python -I tools/spu_isa.py dis <EBOOT.elf> 0xE6F200`
+
+Status (2026-11-09): both EA "Job Manager" SPU threads (image 0xE6F200) boot,
+DMA their parameter blocks in and idle on their job queues at roughly 165 M
+SPU instructions/s each. The PPU main thread is now blocked on **SPURS**
+(`0x536DA0`, the game's SPURS wrapper): `cellSpurs*` is still stubbed, so the
+three SPURS workloads (policy modules = the four SPU images loaded at 0x3000)
+never run. `--dump-after N` now also lists SPU threads.
+
 ## Next steps
-- [ ] SPU thread groups (syscalls 169-192) + SPU interpreter for the 7 embedded SPU programs
-- [ ] cellSpurs (currently stubbed) and the EA Job Manager's SPU jobs
+- [ ] cellSpurs: SPURS kernel (HLE, as in RPCS3) running the game's policy modules at 0x3000
 - [ ] RSX: real rendering (NV4097 3D methods -> Vulkan/D3D12)
 - [ ] cellPad / input, cellAudio, save data, remaining HLE (237 imports still default stubs)
-- [ ] Dump the 7 SPU ELFs and identify what each SPURS workload does
+- [ ] SPU performance: static recompilation of the SPU images (same approach as the PPU)

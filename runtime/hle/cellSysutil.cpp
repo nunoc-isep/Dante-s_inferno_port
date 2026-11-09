@@ -128,9 +128,3 @@ HLE_FUNC(cellSysmodule, cellSysmoduleLoadModule) {
 }
 HLE_FUNC(cellSysmodule, cellSysmoduleUnloadModule) { RET(CELL_OK); }
 HLE_FUNC(cellSysmodule, cellSysmoduleIsLoaded) { RET(CELL_OK); }
-
-// ---------------------------------------------------------------- SPU (initial stub)
-SYSCALL(169, sys_spu_initialize) {
-    LOG_I("spu", "sys_spu_initialize(max_usable_spu %u, max_raw_spu %u)", ARG32(0), ARG32(1));
-    RET(CELL_OK);
-}

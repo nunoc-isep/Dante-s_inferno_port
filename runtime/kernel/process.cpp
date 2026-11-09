@@ -205,7 +205,10 @@ int thread_detach(uint32_t id) {
     return CELL_OK;
 }
 
+void (*g_spu_dump_hook)() = nullptr;
+
 void dump_all_threads() {
+    if (g_spu_dump_hook) g_spu_dump_hook();
     std::lock_guard<std::mutex> lk(g_threads_mutex);
     fprintf(stderr, "\n=== guest threads ===\n");
     for (auto& [id, t] : g_threads) {
