@@ -37,6 +37,16 @@ void spu_dump_all() {
     fflush(stderr);
 }
 
+std::shared_ptr<SpuThread> spu_create_thread(const std::string& name, uint32_t spu_num) {
+    auto t = std::make_shared<SpuThread>();
+    t->name = name;
+    t->spu_num = spu_num;
+    t->id = kobj_add(t);
+    std::lock_guard<std::mutex> lk(g_spu_list_mutex);
+    g_spu_list.push_back(t);
+    return t;
+}
+
 enum : uint32_t {
     SYS_SPU_THREAD_GROUP_JOIN_GROUP_EXIT = 1,
     SYS_SPU_THREAD_GROUP_JOIN_ALL_THREADS_EXIT = 2,

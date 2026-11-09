@@ -58,6 +58,7 @@ struct SpuThread {
     uint32_t event_mask = 0, event_stat = 0;
     uint32_t dec_value = 0;
     uint64_t dec_start = 0;
+    bool dec_armed = false;  // TM event fires once when the decrementer goes negative
 
     // MFC
     uint32_t mfc_lsa = 0, mfc_eah = 0, mfc_eal = 0, mfc_size = 0, mfc_tag = 0;
@@ -94,3 +95,7 @@ uint32_t spu_channel_count(SpuThread& t, uint32_t ch);
 bool spu_stop(SpuThread& t, uint32_t code);
 std::string spu_disasm(uint32_t w, uint32_t pc);
 void spu_dump_all();
+// Create an SPU thread object registered with the kernel (id, diagnostics) but not started.
+std::shared_ptr<SpuThread> spu_create_thread(const std::string& name, uint32_t spu_num);
+// Stop codes 0x3F00-0x3FFF are reserved for HLE kernels (e.g. SPURS): spu_run returns them silently.
+constexpr uint32_t SPU_STOP_HLE_FIRST = 0x3F00;

@@ -119,7 +119,11 @@ static uint32_t pending_events(SpuThread& t) {
     if (!t.in_mbox.empty()) ev |= SPU_EVENT_MB;
     if (t.snr_valid[0]) ev |= SPU_EVENT_S1;
     if (t.snr_valid[1]) ev |= SPU_EVENT_S2;
-    if (t.dec_value && (int32_t)(t.dec_value - (uint32_t)(timebase() - t.dec_start)) < 0) ev |= SPU_EVENT_TM;
+    if (t.dec_armed && (int32_t)(t.dec_value - (uint32_t)(timebase() - t.dec_start)) < 0) {
+        t.dec_armed = false;
+        t.event_stat |= SPU_EVENT_TM;
+        ev |= SPU_EVENT_TM;
+    }
     return ev;
 }
 
@@ -214,6 +218,7 @@ bool spu_write_channel(SpuThread& t, uint32_t ch, uint32_t value) {
         case SPU_WrDec:
             t.dec_value = value;
             t.dec_start = timebase();
+            t.dec_armed = true;
             return true;
         case SPU_WrSRR0: t.srr0 = value; return true;
         case SPU_WrOutMbox: {
@@ -280,6 +285,7 @@ bool spu_stop(SpuThread& t, uint32_t code) {
             std::this_thread::yield();
             return true;
         default:
+            if (code >= SPU_STOP_HLE_FIRST) return false;  // handled by the HLE kernel that started the thread
             LOG_E("spu", "SPU 0x%X: unsupported stop code 0x%X at 0x%05X (out_mbox 0x%X)", t.id, code, t.pc, t.out_mbox);
             return false;
     }

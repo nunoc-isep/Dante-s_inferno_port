@@ -189,8 +189,35 @@ SPU instructions/s each. The PPU main thread is now blocked on **SPURS**
 three SPURS workloads (policy modules = the four SPU images loaded at 0x3000)
 never run. `--dump-after N` now also lists SPU threads.
 
+## SPURS and audio
+
+`runtime/hle/cellSpurs.cpp` is a compact SPURS: the PPU API (attributes,
+initialize, add/ready/shutdown/remove workload, event queues, thread ids,
+finalize) plus a C++ SPU kernel per SPURS SPU that selects a ready workload
+(within its max contention), copies the policy module to LS 0xA00 and starts it
+exactly as the real kernel does ($0 = exit 0x818, $1 = 0x3FFB0, $3 = context
+0x100, $4 = argument, $5 = poll status). The kernel services the module calls
+through the context (poll/select at 0x290, exit at 0x818) are trapped with
+reserved stop codes 0x3F00+.
+
+The game's SPURS instance is `ears_job_ps3` - EA's audio runtime (EARS): four
+persistent workloads share a 2 KB policy module at 0xE8B000 that fetches audio
+jobs into LS 0x4000 and runs them. Analyse it with
+`python -I tools/spu_isa.py raw <dump.bin> A00`.
+
+`runtime/hle/cellAudio.cpp` provides ports, read indices and the 48 kHz mixer
+clock (one 256-sample block every 5.33 ms + notify events). Output is silent
+for now.
+
+Boot progress (2026-11-09): past SPURS and audio init - pads, game data, NP,
+**three frame flips**, audio DAC thread running, MoviePlayer2 decode thread
+started. Current stop: the PPU "Job Manager - Job Thread" allocates from a pool
+whose capacity is 0 (`0x8859B0`, null slot dereference) - something earlier
+that sizes that pool still gets a stubbed answer.
+
 ## Next steps
-- [ ] cellSpurs: SPURS kernel (HLE, as in RPCS3) running the game's policy modules at 0x3000
+- [ ] Find what sizes the Job Manager pool at 0x8859B0 (current crash)
+- [ ] Audio output to a host device (WASAPI) from the cellAudio ports
 - [ ] RSX: real rendering (NV4097 3D methods -> Vulkan/D3D12)
 - [ ] cellPad / input, cellAudio, save data, remaining HLE (237 imports still default stubs)
 - [ ] SPU performance: static recompilation of the SPU images (same approach as the PPU)

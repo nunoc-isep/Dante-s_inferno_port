@@ -280,6 +280,15 @@ SYSCALL(127, sys_rwlock_wunlock) {
 // ---------------------------------------------------------------- event queues / ports
 std::shared_ptr<KEventQueue> event_queue_get(uint32_t id) { return kobj_get<KEventQueue>(id); }
 
+static std::mutex g_eq_key_mutex;
+static std::map<uint64_t, std::weak_ptr<KEventQueue>> g_eq_by_key;
+
+std::shared_ptr<KEventQueue> event_queue_by_key(uint64_t key) {
+    std::lock_guard<std::mutex> lk(g_eq_key_mutex);
+    auto it = g_eq_by_key.find(key);
+    return it == g_eq_by_key.end() ? nullptr : it->second.lock();
+}
+
 void KEventQueue::push(uint64_t source, uint64_t d1, uint64_t d2, uint64_t d3) {
     std::unique_lock<std::mutex> lk(m);
     events.push_back({source, d1, d2, d3});
@@ -293,6 +302,10 @@ SYSCALL(128, sys_event_queue_create) {
     q->size = ARG32(3);
     uint32_t id = kobj_add(q);
     vm::write32(ARG32(0), id);
+    if (q->key) {
+        std::lock_guard<std::mutex> lk(g_eq_key_mutex);
+        g_eq_by_key[q->key] = q;
+    }
     LOG_I("lv2", "event queue 0x%X created (key 0x%llX, size %u)", id, (unsigned long long)q->key, q->size);
     RET(CELL_OK);
 }

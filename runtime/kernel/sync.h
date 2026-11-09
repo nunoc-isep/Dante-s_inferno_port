@@ -40,5 +40,6 @@ struct KEventQueue {
     void push(uint64_t source, uint64_t d1, uint64_t d2, uint64_t d3);
 };
 std::shared_ptr<KEventQueue> event_queue_get(uint32_t id);
+std::shared_ptr<KEventQueue> event_queue_by_key(uint64_t key);  // queues created with a non-zero IPC key
 
 uint64_t system_time_us();

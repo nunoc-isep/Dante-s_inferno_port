@@ -5,6 +5,7 @@ Usage:
   python -I spu_isa.py gen <out.inc>
   python -I spu_isa.py dis <EBOOT.elf> <elf-va-of-spu-image>      disassemble an embedded SPU ELF
   python -I spu_isa.py stats <EBOOT.elf> <va> [<va> ...]           decode coverage
+  python -I spu_isa.py raw <file.bin> <load-address>              disassemble a raw SPU binary
 """
 import struct
 import sys
@@ -168,6 +169,12 @@ def main():
             for k in range(0, len(data) - 3, 4):
                 w = struct.unpack_from(">I", data, k)[0]
                 print(f"{v + k:05X}: {w:08X}  {disasm(w, v + k)}")
+    elif cmd == "raw":  # raw <file> <load address> : disassemble a raw SPU binary
+        data = open(sys.argv[2], "rb").read()
+        base = int(sys.argv[3], 16)
+        for k in range(0, len(data) - 3, 4):
+            w = struct.unpack_from(">I", data, k)[0]
+            print(f"{base + k:05X}: {w:08X}  {disasm(w, base + k)}")
     elif cmd == "stats":
         import collections
         for va in sys.argv[3:]:
