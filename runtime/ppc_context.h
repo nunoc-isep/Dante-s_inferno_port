@@ -79,6 +79,10 @@ struct PPCContext {
     uint32_t reserve_addr;
     uint64_t reserve_value;
     bool reserve_valid;
+    // diagnostics: ring buffer of the most recently entered guest functions
+    uint32_t trace_pos;
+    uint32_t trace[64];
+    void* thread;  // owning GuestThread (runtime/kernel)
 
     inline uint64_t get_cr() const {
         uint32_t v = 0;
@@ -106,6 +110,12 @@ struct PPCContext {
 #define PPC_FUNC(name) void name(PPCContext& __restrict ctx, uint8_t* base)
 #define PPC_FUNC_IMPL(name) PPC_FUNC(name)
 #define PPC_WEAK
+// High-level emulation of an imported library function (see runtime/hle/).
+#define HLE_FUNC(lib, name) PPC_FUNC_IMPL(ppc_import_##lib##_##name)
+
+#ifndef PPC_FUNC_ENTER
+#define PPC_FUNC_ENTER(addr) (ctx.trace[ctx.trace_pos++ & 63] = (addr))
+#endif
 
 typedef void (*PPCFunc)(PPCContext& __restrict ctx, uint8_t* base);
 struct PPCFuncMapping {
@@ -113,6 +123,15 @@ struct PPCFuncMapping {
     PPCFunc host;
 };
 extern const PPCFuncMapping g_ppc_func_table[];
+extern const uint32_t g_ppc_import_stub_lo, g_ppc_import_stub_hi;
+
+// Call an imported (HLE) function the way the PS3 import stub would: the stub
+// stores the caller's TOC (r2) at 0x28(r1) and the caller reloads it afterwards.
+#define PPC_IMPORT_CALL(fn)                                   \
+    do {                                                      \
+        PPC_STORE_U64(ctx.r[1] + 0x28, ctx.r[2]);             \
+        fn(ctx, base);                                        \
+    } while (0)
 
 // ---- runtime services (runtime/ppc_runtime.cpp)
 void ppc_call_indirect(PPCContext& ctx, uint8_t* base, uint32_t target);

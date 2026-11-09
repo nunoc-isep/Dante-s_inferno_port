@@ -5,3 +5,4 @@ analysis/
 *.VIV
 __pycache__/
 build/
+userdata/

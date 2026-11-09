@@ -142,7 +142,8 @@ class Program:
             def call(self, t):
                 if prog.stub_lo <= t < prog.stub_hi:
                     lib, name, nid = prog.imports.get(t, ("unknown", f"stub_{t:08X}", 0))
-                    return f"ppc_import_{lib}_{name}(ctx, base);"
+                    # the import stub saves the caller's TOC at 0x28(r1); the caller reloads it after
+                    return f"PPC_IMPORT_CALL(ppc_import_{lib}_{name});"
                 if t in prog.starts:
                     return f"sub_{t:08X}(ctx, base);"
                 return f"PPC_CALL_INDIRECT(0x{t:X}ull);"
@@ -187,7 +188,7 @@ class Program:
             last = (mn, code)
         if body and body[-1][1] == "data":
             last = ("data", "")
-        lines = [f"PPC_FUNC_IMPL(sub_{start:08X}) {{"]
+        lines = [f"PPC_FUNC_IMPL(sub_{start:08X}) {{", f"\tPPC_FUNC_ENTER(0x{start:08X});"]
         for a, mn, code in body:
             if a in labels:
                 lines.append(f"loc_{a:08X}:")
@@ -223,8 +224,18 @@ class Program:
             print(f"  {mn:16s} {c}")
         return total
 
-    def emit(self, out, only=None, per_file=2000):
+    def emit(self, out, only=None, per_file=2000, hle_dir=None):
         os.makedirs(out, exist_ok=True)
+        written = [0]
+
+        def write(name, text):
+            """Write only when content changed, so incremental builds stay incremental."""
+            path = os.path.join(out, name)
+            if os.path.exists(path) and open(path).read() == text:
+                return
+            open(path, "w").write(text)
+            written[0] += 1
+
         funcs = [f for f in self.funcs if not only or f[0] in only]
         hdr = ["#pragma once", '#include "ppc_context.h"', ""]
         for s in sorted(self.starts):
@@ -233,7 +244,7 @@ class Program:
         hdr.append("")
         for lib, name, nid in used_imports:
             hdr.append(f"PPC_FUNC(ppc_import_{lib}_{name}); // NID 0x{nid:08X}")
-        open(os.path.join(out, "ppc_funcs.h"), "w").write("\n".join(hdr) + "\n")
+        write("ppc_funcs.h", "\n".join(hdr) + "\n")
 
         files = 0
         for k in range(0, len(funcs), per_file):
@@ -243,22 +254,40 @@ class Program:
                 code, _ = self.translate_func(s, e, nxt)
                 src.append(code)
                 src.append("")
-            open(os.path.join(out, f"ppc_recomp_{files:03d}.cpp"), "w").write("\n".join(src))
+            write(f"ppc_recomp_{files:03d}.cpp", "\n".join(src))
             files += 1
 
+        # function table: recompiled functions + import stubs (for indirect calls)
+        entries = {f[0]: f"sub_{f[0]:08X}" for f in funcs}
+        for stub, (lib, name, nid) in self.imports.items():
+            entries[stub] = f"ppc_import_{lib}_{name}"
         table = ['#include "ppc_funcs.h"', "", "const PPCFuncMapping g_ppc_func_table[] = {"]
-        emitted = {f[0] for f in funcs}
-        for s in sorted(emitted):
-            table.append(f"\t{{ 0x{s:08X}, sub_{s:08X} }},")
-        table += ["\t{ 0, nullptr }", "};", ""]
-        open(os.path.join(out, "ppc_func_table.cpp"), "w").write("\n".join(table))
+        for a in sorted(entries):
+            table.append(f"\t{{ 0x{a:08X}, {entries[a]} }},")
+        table += ["\t{ 0, nullptr }", "};", "",
+                  f"const uint32_t g_ppc_import_stub_lo = 0x{self.stub_lo:08X};",
+                  f"const uint32_t g_ppc_import_stub_hi = 0x{self.stub_hi:08X};", ""]
+        write("ppc_func_table.cpp", "\n".join(table))
 
+        # default stubs for every import not implemented by hand in runtime/hle
+        implemented = set()
+        if hle_dir and os.path.isdir(hle_dir):
+            for root, _, names in os.walk(hle_dir):
+                for fn_ in names:
+                    if fn_.endswith(".cpp"):
+                        implemented |= set(re.findall(r"^HLE_FUNC\((\w+),\s*(\w+)\)",
+                                                      open(os.path.join(root, fn_)).read(), re.M))
         stubs = ['#include "ppc_funcs.h"', "", "// Auto-generated default HLE stubs: log + return 0.",
-                 "// Real implementations go in runtime/hle/ and replace these one by one.", ""]
+                 "// Implement a function with HLE_FUNC(lib, name) in runtime/hle/ to replace its stub.", ""]
+        n_impl = 0
         for lib, name, nid in used_imports:
-            stubs.append(f'PPC_WEAK PPC_FUNC_IMPL(ppc_import_{lib}_{name}) {{ ppc_hle_unimplemented("{lib}", "{name}", 0x{nid:08X}u, ctx); }}')
-        open(os.path.join(out, "ppc_imports_default.cpp"), "w").write("\n".join(stubs) + "\n")
-        print(f"emitted {len(funcs)} functions into {files} files in {out}")
+            if (lib, name) in implemented:
+                n_impl += 1
+                continue
+            stubs.append(f'PPC_FUNC_IMPL(ppc_import_{lib}_{name}) {{ ppc_hle_unimplemented("{lib}", "{name}", 0x{nid:08X}u, ctx); }}')
+        write("ppc_imports_default.cpp", "\n".join(stubs) + "\n")
+        print(f"emitted {len(funcs)} functions into {files} files in {out} "
+              f"({written[0]} files changed, {n_impl}/{len(used_imports)} imports implemented by HLE)")
 
 
 def main():
@@ -268,14 +297,15 @@ def main():
     ap.add_argument("out", nargs="?")
     ap.add_argument("--stats", action="store_true")
     ap.add_argument("--only", help="comma-separated function addresses")
-    ap.add_argument("--per-file", type=int, default=2000)
+    ap.add_argument("--per-file", type=int, default=1000)
+    ap.add_argument("--hle-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runtime"))
     a = ap.parse_args()
     p = Program(a.elf, a.info)
     if a.stats:
         p.stats()
     if a.out:
         only = {int(x, 16) for x in a.only.split(",")} if a.only else None
-        p.emit(a.out, only, a.per_file)
+        p.emit(a.out, only, a.per_file, a.hle_dir)
 
 
 if __name__ == "__main__":

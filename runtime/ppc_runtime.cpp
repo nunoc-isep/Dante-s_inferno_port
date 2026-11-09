@@ -1,9 +1,12 @@
-// Minimal runtime services for the recompiled code (prototype).
+// Core services the recompiled code calls into: indirect calls, traps, HLE fallbacks.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
+#include <mutex>
+#include <string>
 
-#include "ppc_context.h"
+#include "kernel/kernel.h"
 
 static size_t g_func_count = 0;
 
@@ -20,39 +23,48 @@ static const PPCFuncMapping* find_func(uint32_t guest) {
     return nullptr;
 }
 
+[[noreturn]] static void fatal(PPCContext& ctx, const char* fmt, uint32_t a, uint32_t b = 0) {
+    fprintf(stderr, "\n*** ");
+    fprintf(stderr, fmt, a, b);
+    fprintf(stderr, "\n");
+    dump_trace(ctx);
+    fflush(stderr);
+    _Exit(4);
+}
+
 void ppc_call_indirect(PPCContext& ctx, uint8_t* base, uint32_t target) {
     const PPCFuncMapping* m = find_func(target);
     if (!m) {
-        fprintf(stderr, "[ppc] indirect call to unknown address 0x%08X (lr=0x%08llX)\n", target,
-                (unsigned long long)ctx.lr);
-        abort();
+        if (PPCFunc cb = hle_callback_lookup(target)) return cb(ctx, base);
+        fatal(ctx, "indirect call to unknown guest address 0x%08X (lr=0x%08X)", target, (uint32_t)ctx.lr);
     }
+    if (target >= g_ppc_import_stub_lo && target < g_ppc_import_stub_hi)
+        PPC_STORE_U64(ctx.r[1] + 0x28, ctx.r[2]);  // what the import stub would have done
     m->host(ctx, base);
 }
 
-void ppc_syscall(PPCContext& ctx, uint8_t*, uint32_t addr) {
-    fprintf(stderr, "[lv2] unimplemented syscall %llu at 0x%08X\n", (unsigned long long)ctx.r[11], addr);
-    ctx.r[3] = 0;
-}
+void ppc_trap(PPCContext& ctx, uint32_t addr) { fatal(ctx, "guest trap instruction at 0x%08X", addr); }
 
-void ppc_trap(PPCContext&, uint32_t addr) {
-    fprintf(stderr, "[ppc] trap at 0x%08X\n", addr);
-    abort();
-}
-
-void ppc_unimplemented(PPCContext&, uint32_t addr, const char* mn, uint32_t word) {
-    fprintf(stderr, "[ppc] unimplemented instruction %s (0x%08X) at 0x%08X\n", mn, word, addr);
-    abort();
+void ppc_unimplemented(PPCContext& ctx, uint32_t addr, const char* mn, uint32_t word) {
+    fprintf(stderr, "unimplemented instruction %s (0x%08X)\n", mn, word);
+    fatal(ctx, "at 0x%08X", addr);
 }
 
 void ppc_unreachable(PPCContext& ctx, uint32_t addr) {
-    fprintf(stderr, "[ppc] unhandled jump-table target 0x%08llX at 0x%08X\n",
-            (unsigned long long)ctx.ctr, addr);
-    abort();
+    fatal(ctx, "jump table at 0x%08X: unexpected target 0x%08X", addr, (uint32_t)ctx.ctr);
 }
 
 void ppc_hle_unimplemented(const char* lib, const char* name, uint32_t nid, PPCContext& ctx) {
-    fprintf(stderr, "[hle] %s::%s (NID 0x%08X) not implemented, returning 0\n", lib, name, nid);
+    static std::mutex m;
+    static std::map<std::string, int> seen;
+    int n;
+    {
+        std::lock_guard<std::mutex> lk(m);
+        n = seen[name]++;
+    }
+    if (n < 3)
+        LOG_W("hle", "%s::%s (NID 0x%08X) not implemented, returning CELL_OK (r3=0x%llX r4=0x%llX lr=0x%08X)", lib,
+              name, nid, (unsigned long long)ctx.r[3], (unsigned long long)ctx.r[4], (uint32_t)ctx.lr);
     ctx.r[3] = 0;
 }
 

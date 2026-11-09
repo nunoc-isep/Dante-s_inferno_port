@@ -133,7 +133,44 @@ Known simplifications: XER[OV] is not tracked (the `o` forms compute the
 right result only), vector estimates (`vrefp`, `vrsqrtefp`) are exact, and
 loops split across "functions" by outgoing branches recurse on the C++ stack.
 
+## Boot runtime
+
+Build and run (needs clang++ 16+ and Python 3):
+```
+python -I tools/build.py          # regenerate (only changed files rewritten), compile, link -> build/dante.exe
+build/dante.exe                   # options: --game <dump root>  --trace  --dump-after <seconds>
+```
+The first build compiles all 54 generated files (~10 min with 8 jobs); after
+that, runtime/HLE changes rebuild in seconds.
+
+```
+runtime/main.cpp            boot: memory, ELF load, argv, main thread registers, run
+runtime/kernel/memory.cpp   4 GB guest reservation, areas (main/user/kernel/mmapper/video/stack), allocator
+runtime/kernel/process.cpp  ELF loader, PPU threads (1 host thread each), TLS, syscall dispatch,
+                            HLE callbacks, crash handler with guest call trace
+runtime/kernel/sync.cpp     lv2 mutex/cond/semaphore/rwlock/event queue+port, timers, time, memory, TTY
+runtime/kernel/fs.cpp       VFS (/dev_bdvd, /app_home, /dev_hdd0...) + cellFs and sys_fs syscalls
+runtime/hle/                sysPrxForUser, cellGcmSys, cellSysutil/cellSysmodule
+runtime/rsx/                RSX command processor: jumps/calls, semaphores, flips (no drawing yet)
+```
+Any import implemented with `HLE_FUNC(lib, name)` anywhere under `runtime/`
+automatically replaces the generated "not implemented" stub.
+
+Boot progress (2026-11-09): the game runs its own startup code natively -
+allocates 193 MB, loads system modules, initialises GCM (720p, two 1280x720
+display buffers), starts 11 threads (workers, Job Manager, Presentation,
+TextureWorker), opens BIGFILE0-2.VIV through the VFS and **submits its first
+frame flip** (497 RSX methods). It then waits on the EA Job Manager, which runs
+its jobs on SPU threads (syscalls 170/172/173/191, SPU image at 0xE6F200) that
+are not emulated yet.
+
+Lessons: MinGW's emulated `thread_local` is unreliable here - use the Win32
+TLS slot (`current_thread()`); HLE import calls must store r2 at 0x28(r1)
+like the real import stub, because callers reload the TOC from there.
+
 ## Next steps
-- [ ] Runtime: guest memory map, TLS, PPU threads, first HLE modules (sysPrxForUser, sys_fs)
-- [ ] Boot `sub_00010230` (entry) and follow it until the first missing piece
+- [ ] SPU thread groups (syscalls 169-192) + SPU interpreter for the 7 embedded SPU programs
+- [ ] cellSpurs (currently stubbed) and the EA Job Manager's SPU jobs
+- [ ] RSX: real rendering (NV4097 3D methods -> Vulkan/D3D12)
+- [ ] cellPad / input, cellAudio, save data, remaining HLE (237 imports still default stubs)
 - [ ] Dump the 7 SPU ELFs and identify what each SPURS workload does
