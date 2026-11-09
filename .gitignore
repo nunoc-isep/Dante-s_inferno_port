@@ -1,0 +1,7 @@
+analysis/
+*.elf
+*.bin
+*.viv
+*.VIV
+__pycache__/
+build/
