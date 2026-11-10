@@ -1,14 +1,17 @@
-// sys_io: one standard controller on port 0, driven by the keyboard while the
-// game window (or the console) has focus. cellKb reports no keyboard.
+// sys_io: one standard controller on port 0 - a DualShock 4 / DualSense / XInput controller
+// (runtime/input/gamepad.cpp), merged with the keyboard while the game window (or the console)
+// has focus and with scripted --input presses. cellKb reports no keyboard.
 //   arrows = D-pad, Enter = START, Backspace = SELECT, Z = CROSS, X = CIRCLE,
 //   A = SQUARE, S = TRIANGLE, Q/W = L1/R1, 1/2 = L2/R2
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <utility>
 
 #include "../gpu/gpu.h"
+#include "../input/gamepad.h"
 #include "../rsx/rsx.h"
 #include "../kernel/kernel.h"
 
@@ -50,7 +53,9 @@ bool key(int vk) {
 
 HLE_FUNC(sys_io, cellPadInit) {
     g_pad_init = true;
-    LOG_I("pad", "cellPadInit(max %u): controller 0 mapped to the keyboard (console window focus)", ARG32(0));
+    gamepad_start();
+    LOG_I("pad", "cellPadInit(max %u): port 0 = DualShock 4 / DualSense / XInput controller, or the keyboard",
+          ARG32(0));
     RET(CELL_OK);
 }
 HLE_FUNC(sys_io, cellPadEnd) {
@@ -67,7 +72,7 @@ HLE_FUNC(sys_io, cellPadGetInfo2) {
     vm::write32(p + 0, 7);
     vm::write32(p + 4, 1);
     vm::write32(p + 12, 1);              // port 0: connected
-    vm::write32(p + 12 + 28 * 2, 0x7);   // capability: PS3 conformity | press | sensor
+    vm::write32(p + 12 + 28 * 2, 0x17);  // capability: PS3 conformity | press | sensor | actuator (rumble)
     vm::write32(p + 12 + 28 * 3, 0);     // standard controller
     RET(CELL_OK);
 }
@@ -97,24 +102,40 @@ HLE_FUNC(sys_io, cellPadGetData) {
     d1 |= s1;
     d2 |= s2;
     if ((s1 | s2) && !(g_rsx.flips % 4)) LOG_I("pad", "scripted input at frame %u: 0x%02X 0x%02X", (unsigned)g_rsx.flips, s1, s2);
+    PadState gp = gamepad_state();
+    d1 |= gp.d1;
+    d2 |= gp.d2;
     vm::write32(d, 24);
     uint32_t b = d + 4;
     vm::write16(b + 2 * 1, 0x0070);  // number of valid data blocks (upper nibble), as reported by real pads
     vm::write16(b + 2 * 2, d1);
     vm::write16(b + 2 * 3, d2);
-    for (int i = 4; i < 8; ++i) vm::write16(b + 2 * i, 0x80);  // sticks centred
-    // pressure values for the pressed digital buttons
+    // sticks: right X/Y, left X/Y (centred when no controller)
+    vm::write16(b + 2 * 4, gp.connected ? gp.rx : 0x80);
+    vm::write16(b + 2 * 5, gp.connected ? gp.ry : 0x80);
+    vm::write16(b + 2 * 6, gp.connected ? gp.lx : 0x80);
+    vm::write16(b + 2 * 7, gp.connected ? gp.ly : 0x80);
+    // pressure values: right, left, up, down, triangle, circle, cross, square, L1, R1, L2, R2
     static const struct { int idx; uint16_t* reg; uint16_t bit; } press[] = {
         {8, &d1, 0x20}, {9, &d1, 0x80}, {10, &d1, 0x10}, {11, &d1, 0x40}, {12, &d2, 0x10}, {13, &d2, 0x20},
         {14, &d2, 0x40}, {15, &d2, 0x80}, {16, &d2, 0x04}, {17, &d2, 0x08}, {18, &d2, 0x01}, {19, &d2, 0x02}};
     for (auto& p : press) vm::write16(b + 2 * p.idx, (*p.reg & p.bit) ? 0xFF : 0);
+    if (gp.connected) {  // analog triggers give real L2/R2 pressure
+        vm::write16(b + 2 * 18, std::max<uint16_t>(vm::read16(b + 2 * 18), gp.l2));
+        vm::write16(b + 2 * 19, std::max<uint16_t>(vm::read16(b + 2 * 19), gp.r2));
+    }
     for (int i = 20; i < 23; ++i) vm::write16(b + 2 * i, 0x200);  // motion sensors at rest
     vm::write16(b + 2 * 23, 0x200);
     RET(CELL_OK);
 }
 
 HLE_FUNC(sys_io, cellPadSetPortSetting) { RET(CELL_OK); }
-HLE_FUNC(sys_io, cellPadSetActDirect) { RET(CELL_OK); }
+// cellPadSetActDirect(port, CellPadActParam*): motor[0] = small motor on/off, motor[1] = big motor 0-255
+HLE_FUNC(sys_io, cellPadSetActDirect) {
+    uint32_t p = ARG32(1);
+    if (ARG32(0) == 0 && p) gamepad_rumble(vm::read8(p) ? 200 : 0, vm::read8(p + 1));
+    RET(CELL_OK);
+}
 
 // keyboard library: initialised, but no keyboard connected
 HLE_FUNC(sys_io, cellKbInit) { RET(CELL_OK); }

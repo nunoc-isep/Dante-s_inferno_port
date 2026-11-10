@@ -230,9 +230,17 @@ Debugging aids: crash reports show all GPRs and the guest call stack (walked
 through PPC64 back chains); an SPU that halts or hits an invalid instruction
 saves `spu_<id>_<pc>.ls/.regs`; `--dump-after N` lists PPU and SPU threads.
 
-Input: controller 0 is mapped to the keyboard while the game window (or the
-console) has focus (arrows, Enter = START, Backspace = SELECT, Z/X/A/S = cross/circle/
-square/triangle, Q/W = L1/R1, 1/2 = L2/R2).
+Input (`runtime/input/gamepad.cpp`, `runtime/hle/cellPad.cpp`): controller port 0 is
+- a **DualShock 4** (USB, Bluetooth, wireless adapter) or **DualSense / DualSense Edge**
+  (USB, Bluetooth), read natively over HID - no extra software needed; or
+- any **XInput** controller (Xbox pads, or a PlayStation pad through DS4Windows / Steam Input);
+- merged with the keyboard while the game window has focus (arrows = D-pad, Enter = START,
+  Backspace = SELECT, Z/X/A/S = cross/circle/square/triangle, Q/W = L1/R1, 1/2 = L2/R2).
+
+Buttons map 1:1 to the PS3 pad (Options = START, Share/Create = SELECT), both sticks
+and analog L2/R2 pressure are passed through, and rumble (`cellPadSetActDirect`)
+plus a dark-red lightbar are sent over USB (Bluetooth output is not implemented
+yet). Controllers can be plugged in or out while the game runs.
 
 ## Rendering (D3D11)
 
