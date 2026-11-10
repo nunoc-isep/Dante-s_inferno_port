@@ -4,11 +4,41 @@
 //   A = SQUARE, S = TRIANGLE, Q/W = L1/R1, 1/2 = L2/R2
 #include <windows.h>
 
+#include <cstdio>
+#include <cstring>
+#include <utility>
+
 #include "../gpu/gpu.h"
+#include "../rsx/rsx.h"
 #include "../kernel/kernel.h"
+
+// --input "frame:BUTTON,frame:BUTTON": scripted presses (each held for 8 frames) for automated runs
+char g_input_script[1024] = "";
 
 namespace {
 bool g_pad_init = false;
+
+// returns {digital1, digital2} bits pressed by the script at the current frame
+std::pair<uint16_t, uint16_t> scripted_buttons() {
+    static const struct { const char* name; int word; uint16_t bit; } names[] = {
+        {"LEFT", 1, 0x80}, {"DOWN", 1, 0x40}, {"RIGHT", 1, 0x20}, {"UP", 1, 0x10}, {"START", 1, 0x08},
+        {"R3", 1, 0x04}, {"L3", 1, 0x02}, {"SELECT", 1, 0x01}, {"SQUARE", 2, 0x80}, {"CROSS", 2, 0x40},
+        {"CIRCLE", 2, 0x20}, {"TRIANGLE", 2, 0x10}, {"R1", 2, 0x08}, {"L1", 2, 0x04}, {"R2", 2, 0x02}, {"L2", 2, 0x01}};
+    uint16_t d1 = 0, d2 = 0;
+    uint32_t now = g_rsx.flips;
+    const char* p = g_input_script;
+    while (*p) {
+        unsigned frame = 0;
+        char btn[16] = {0};
+        if (sscanf(p, "%u:%15[A-Z0-9]", &frame, btn) == 2 && now >= frame && now < frame + 8)
+            for (auto& n : names)
+                if (!strcmp(n.name, btn)) (n.word == 1 ? d1 : d2) |= n.bit;
+        const char* c = strchr(p, ',');
+        if (!c) break;
+        p = c + 1;
+    }
+    return {d1, d2};
+}
 enum : uint32_t { CELL_PAD_ERROR_UNINITIALIZED = 0x80121103, CELL_PAD_ERROR_INVALID_PARAMETER = 0x80121104,
                   CELL_PAD_ERROR_NO_DEVICE = 0x80121107 };
 
@@ -63,6 +93,10 @@ HLE_FUNC(sys_io, cellPadGetData) {
     if (key('Q')) d2 |= 0x04;
     if (key('2')) d2 |= 0x02;
     if (key('1')) d2 |= 0x01;
+    auto [s1, s2] = scripted_buttons();
+    d1 |= s1;
+    d2 |= s2;
+    if ((s1 | s2) && !(g_rsx.flips % 4)) LOG_I("pad", "scripted input at frame %u: 0x%02X 0x%02X", (unsigned)g_rsx.flips, s1, s2);
     vm::write32(d, 24);
     uint32_t b = d + 4;
     vm::write16(b + 2 * 1, 0x0070);  // number of valid data blocks (upper nibble), as reported by real pads

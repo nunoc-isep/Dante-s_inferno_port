@@ -262,9 +262,30 @@ only mip level 0 is uploaded, texture remap (CONTROL1) and unnormalised
 coordinates are ignored, depth surfaces at the same address are recreated when
 their size changes, vertex/fragment flow control is not translated yet.
 
+## Reaching the main menu
+
+Status (2026-11-10): **intro movies -> title screen -> main menu** run with no
+errors and no unimplemented calls on the way. Reproduce with:
+```
+build/dante.exe --input "6700:START,9800:CROSS" --screenshot 6600,9600,10800
+```
+(title "Press START" at ~6600, the game's PSN notice at ~9600, main menu at ~10800).
+
+What it took after the intro: an offline PSN (`sceNp*`, `cellNetCtl`, `sys_net` -
+status OFFLINE, identity queries fail), the game-data utility calling the game's
+`funcStat` callback, save data (auto/list/fixed load+save with the full
+stat/file callback protocol, stored in `userdata/dev_hdd0/home/00000001/savedata`),
+system message dialogs answered through the sysutil callback queue
+(`cellSysutilCheckCallback`), trophies (registration callbacks, unlocks logged),
+`cellRtc` and `cellSync` mutexes.
+
+`--input "frame:BUTTON,..."` scripts controller presses (held 8 frames; START,
+SELECT, CROSS, CIRCLE, SQUARE, TRIANGLE, UP/DOWN/LEFT/RIGHT, L1/R1/L2/R2, L3/R3)
+so menu navigation is reproducible and testable with screenshots.
+
 ## Next steps
 - [ ] Audio output to a host device (WASAPI) from the cellAudio ports
 - [ ] Rendering: culling, mipmaps, texture remap, shader flow control, surface size/aliasing rules
-- [ ] Get past the intro movies into the menus
-- [ ] Save data, game data, NP (offline answers), remaining HLE (~195 imports still default stubs)
+- [ ] Start Game: load the first level (expect heavy 3D: shader flow control, mipmaps, culling, more formats)
+- [ ] Remaining HLE (110 imports still default stubs: cellPngDec, cellAdec, cellMic, cellHttp, OSK, ...)
 - [ ] SPU performance: static recompilation of the SPU images (same approach as the PPU)

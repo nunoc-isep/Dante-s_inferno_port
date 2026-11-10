@@ -1,6 +1,6 @@
 // Dante's Inferno PC port - boot.
 //
-// Usage: dante.exe [--game <dump root>] [--user <dir>] [--trace] [--dump-after <seconds>] [--screenshot <frame>]
+// Usage: dante.exe [--game <dump root>] [--user <dir>] [--trace] [--dump-after <seconds>] [--screenshot <frames>] [--input "frame:BUTTON,..."]
 //   <dump root> is the folder containing PS3_GAME/. If omitted, a folder named
 //   "Dante's Inferno" (or any folder containing PS3_GAME/) is searched for next
 //   to and above the executable, then next to and above the current folder.
@@ -62,6 +62,10 @@ int main(int argc, char** argv) {
             snprintf(g_screenshot_list, sizeof(g_screenshot_list), ",%s,", argv[++i]);
             g_screenshot_frame = 1;
         } else if (!strcmp(argv[i], "--rsx-debug") && i + 1 < argc) g_rsx_debug = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--input") && i + 1 < argc) {
+            extern char g_input_script[1024];
+            snprintf(g_input_script, sizeof(g_input_script), "%s", argv[++i]);
+        }
         else if (!strcmp(argv[i], "--dump-after") && i + 1 < argc) {
             // diagnostics: print every guest thread's recent call trace after N seconds
             int secs = atoi(argv[++i]);

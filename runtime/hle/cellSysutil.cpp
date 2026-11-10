@@ -104,7 +104,6 @@ HLE_FUNC(cellSysutil, cellSysutilUnregisterCallback) {
     if (slot < 4) g_sysutil_cb[slot] = 0;
     RET(CELL_OK);
 }
-HLE_FUNC(cellSysutil, cellSysutilCheckCallback) { RET(CELL_OK); }
 HLE_FUNC(cellSysutil, cellSysutilEnableBgmPlayback) { RET(CELL_OK); }
 HLE_FUNC(cellSysutil, cellSysutilDisableBgmPlayback) { RET(CELL_OK); }
 
@@ -129,3 +128,55 @@ HLE_FUNC(cellSysmodule, cellSysmoduleLoadModule) {
 }
 HLE_FUNC(cellSysmodule, cellSysmoduleUnloadModule) { RET(CELL_OK); }
 HLE_FUNC(cellSysmodule, cellSysmoduleIsLoaded) { RET(CELL_OK); }
+
+// ---------------------------------------------------------------- game data
+// cellGameDataCheckCreate2(version, dirName, errDialog, funcStat (OPD), container)
+// Calls funcStat(cbResult, get, set) synchronously, as the system utility does.
+// Layouts (RPCS3 cellGame.h): CellGameDataCBResult {s32 result, errNeedSizeKB; u32 invalidMsg, reserved}
+// CellGameDataStatGet: s32 hddFreeSizeKB @0, u32 isNewData @4, char contentInfoPath[1055] @8,
+//   char gameDataPath[1055] @1063, pad, s64 atime/mtime/ctime @2120, CellGameDataSystemFileParam @2144
+//   (title[128], titleLang[20][128], titleId[10]+2, dataVersion[6]+2, u32 parentalLevel, attribute, ...),
+//   s32 sizeKB @5116, sysSizeKB @5120
+HLE_FUNC(cellSysutil, cellGameDataCheckCreate2) {
+    std::string dir_name = vm::read_cstr(ARG32(1), 64);
+    uint32_t func_stat = ARG32(3);
+    std::string guest_dir = "/dev_hdd0/game/" + dir_name;
+    std::error_code ec;
+    std::filesystem::path host((const char8_t*)vfs_host_path(guest_dir).c_str());
+    bool is_new = !std::filesystem::exists(host, ec);
+
+    uint32_t mem = vm::alloc(vm::Area::Kernel, 0x4000, 0x100);
+    memset(vm::ptr(mem), 0, 0x4000);
+    uint32_t result = mem, get = mem + 0x100, set = mem + 0x1800;
+    vm::write32(get + 0, 40 * 1024 * 1024);  // 40 GB free
+    vm::write32(get + 4, is_new ? 1 : 0);    // CELL_GAMEDATA_ISNEWDATA_YES / NO
+    vm::write_cstr(get + 8, guest_dir);
+    vm::write_cstr(get + 1063, guest_dir + "/USRDIR");
+    vm::write_cstr(get + 2144, "Dante's Inferno");
+    vm::write_cstr(get + 2144 + 128 + 2560, "BLUS30405");
+    vm::write_cstr(get + 2144 + 128 + 2560 + 12, "01.00");
+    vm::write32(get + 5116, (uint32_t)-1);  // CELL_GAMEDATA_SIZEKB_NOTCALC
+    LOG_I("gamedata", "cellGameDataCheckCreate2('%s'): %s data, calling the game's callback", dir_name.c_str(),
+          is_new ? "new" : "existing");
+
+    PPCContext saved = ctx;  // the callback runs on this thread's guest stack
+    ctx.r[3] = result;
+    ctx.r[4] = get;
+    ctx.r[5] = set;
+    call_guest_opd(ctx, func_stat);
+    int32_t cb = (int32_t)vm::read32(result);
+    PPCContext after = ctx;
+    ctx = saved;
+    (void)after;
+    vm::free(vm::Area::Kernel, mem);
+    LOG_I("gamedata", "  callback result %d", cb);
+    if (cb == 0 || cb == 1) {  // OK / OK_CANCEL
+        if (cb == 0) std::filesystem::create_directories(host / "USRDIR", ec);
+        return (void)RET(CELL_OK);
+    }
+    RET(0x8002B60A);  // CELL_GAMEDATA_ERROR_CBRESULT
+}
+HLE_FUNC(cellSysutil, cellGameDataGetSizeKB) {
+    if (ARG32(0)) vm::write32(ARG32(0), 0);
+    RET(CELL_OK);
+}
