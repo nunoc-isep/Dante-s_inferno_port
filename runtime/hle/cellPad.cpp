@@ -1,9 +1,10 @@
 // sys_io: one standard controller on port 0, driven by the keyboard while the
-// console window has focus (no window of our own yet). cellKb reports no keyboard.
+// game window (or the console) has focus. cellKb reports no keyboard.
 //   arrows = D-pad, Enter = START, Backspace = SELECT, Z = CROSS, X = CIRCLE,
 //   A = SQUARE, S = TRIANGLE, Q/W = L1/R1, 1/2 = L2/R2
 #include <windows.h>
 
+#include "../gpu/gpu.h"
 #include "../kernel/kernel.h"
 
 namespace {
@@ -13,7 +14,7 @@ enum : uint32_t { CELL_PAD_ERROR_UNINITIALIZED = 0x80121103, CELL_PAD_ERROR_INVA
 
 bool key(int vk) {
     HWND fg = GetForegroundWindow();
-    return fg && fg == GetConsoleWindow() && (GetAsyncKeyState(vk) & 0x8000);
+    return fg && (fg == GetConsoleWindow() || fg == g_gpu.hwnd) && (GetAsyncKeyState(vk) & 0x8000);
 }
 }  // namespace
 

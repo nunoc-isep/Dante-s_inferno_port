@@ -26,3 +26,8 @@ extern RsxState g_rsx;
 void rsx_start();
 // Translate an RSX offset (io space) to a guest address; 0 if unmapped.
 uint32_t rsx_io_to_addr(uint32_t offset);
+
+// D3D11 renderer (rsx_render.cpp), driven from the RSX thread
+bool rsx_render_init();
+void rsx_render_method(uint32_t method, uint32_t arg);
+void rsx_render_flip(uint32_t buffer);

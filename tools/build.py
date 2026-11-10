@@ -85,7 +85,7 @@ def main():
     print(f"compiled in {time.time() - t0:.0f}s, linking...")
     exe = os.path.join(ROOT, "build", "dante.exe")
     objs = [obj_for(s) for s, _, _ in jobs]
-    r = subprocess.run([CXX, "-o", exe, *objs, "-static", "-Wl,--whole-archive", "-lpthread", "-Wl,--no-whole-archive", "-Wl,--stack,16777216"], capture_output=True, text=True)
+    r = subprocess.run([CXX, "-o", exe, *objs, "-static", "-Wl,--whole-archive", "-lpthread", "-Wl,--no-whole-archive", "-ld3d11", "-ld3dcompiler", "-ldxguid", "-luuid", "-lgdi32", "-luser32", "-Wl,--stack,16777216"], capture_output=True, text=True)
     if r.returncode:
         print(r.stderr[:8000])
         return 1

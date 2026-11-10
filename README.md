@@ -230,12 +230,41 @@ Debugging aids: crash reports show all GPRs and the guest call stack (walked
 through PPC64 back chains); an SPU that halts or hits an invalid instruction
 saves `spu_<id>_<pc>.ls/.regs`; `--dump-after N` lists PPU and SPU threads.
 
-Input: controller 0 is mapped to the keyboard while the console window has
-focus (arrows, Enter = START, Backspace = SELECT, Z/X/A/S = cross/circle/
+Input: controller 0 is mapped to the keyboard while the game window (or the
+console) has focus (arrows, Enter = START, Backspace = SELECT, Z/X/A/S = cross/circle/
 square/triangle, Q/W = L1/R1, 1/2 = L2/R2).
+
+## Rendering (D3D11)
+
+```
+runtime/gpu/gpu.cpp        window (own message-loop thread), D3D11 device/swap chain, present, PNG screenshots
+runtime/rsx/rsx_vp.cpp     RSX vertex program -> HLSL (vector + scalar halves, swizzles, masks, CC, ARL)
+runtime/rsx/rsx_fp.cpp     RSX fragment program -> HLSL (halfword-swapped words, inline constants, R/H regs,
+                           texture ops, condition codes, KIL, R0/H0 + MRT outputs, alpha test)
+runtime/rsx/rsx_render.cpp register file, vertex-program/constant uploads, colour/depth surfaces keyed by guest
+                           address, clears, draws (CPU vertex fetch with big-endian format conversion, all
+                           primitive types incl. quads), textures (A8R8G8B8, B8, 16-bit formats, DXT1/3/5,
+                           swizzled or linear), render-to-texture, blend/depth/scissor, viewport transform
+```
+Shaders are generated as HLSL text and compiled at runtime with `D3DCompile`
+(`d3dcompiler_47.dll` ships with Windows), cached by microcode hash.
+
+Options: `--screenshot 300,900` saves those frames as `screenshot_N.png`;
+`--rsx-debug N` logs every draw of frame N (attributes, viewport, textures with
+average values, constant/program uploads) and writes the generated shaders to
+`shader_*.hlsl`.
+
+Status (2026-11-10): **the intro movie plays on screen** - EA's VP6 logo movie,
+decoded by the game's own code on the recompiled PPU + emulated SPUs, uploaded
+as Y/U/V textures, converted by the game's YUV->RGB fragment program, rendered
+off-screen and copied to the display buffer. Known gaps: culling is disabled,
+only mip level 0 is uploaded, texture remap (CONTROL1) and unnormalised
+coordinates are ignored, depth surfaces at the same address are recreated when
+their size changes, vertex/fragment flow control is not translated yet.
 
 ## Next steps
 - [ ] Audio output to a host device (WASAPI) from the cellAudio ports
-- [ ] **Window + RSX rendering** (NV4097 3D methods -> Vulkan/D3D12) - the next milestone
+- [ ] Rendering: culling, mipmaps, texture remap, shader flow control, surface size/aliasing rules
+- [ ] Get past the intro movies into the menus
 - [ ] Save data, game data, NP (offline answers), remaining HLE (~195 imports still default stubs)
 - [ ] SPU performance: static recompilation of the SPU images (same approach as the PPU)

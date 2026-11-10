@@ -1,6 +1,6 @@
 // Dante's Inferno PC port - boot.
 //
-// Usage: dante.exe [--game <dump root>] [--user <dir>] [--trace] [--dump-after <seconds>]
+// Usage: dante.exe [--game <dump root>] [--user <dir>] [--trace] [--dump-after <seconds>] [--screenshot <frame>]
 //   <dump root> is the folder containing PS3_GAME/. If omitted, a folder named
 //   "Dante's Inferno" (or any folder containing PS3_GAME/) is searched for next
 //   to and above the executable, then next to and above the current folder.
@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "gpu/gpu.h"
 #include "kernel/kernel.h"
 
 namespace fs = std::filesystem;
@@ -57,6 +58,10 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[i], "--game") && i + 1 < argc) game_root = argv[++i];
         else if (!strcmp(argv[i], "--user") && i + 1 < argc) user_root = argv[++i];
         else if (!strcmp(argv[i], "--trace")) g_log_level = LogLevel::Trace;
+        else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) {
+            snprintf(g_screenshot_list, sizeof(g_screenshot_list), ",%s,", argv[++i]);
+            g_screenshot_frame = 1;
+        } else if (!strcmp(argv[i], "--rsx-debug") && i + 1 < argc) g_rsx_debug = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dump-after") && i + 1 < argc) {
             // diagnostics: print every guest thread's recent call trace after N seconds
             int secs = atoi(argv[++i]);

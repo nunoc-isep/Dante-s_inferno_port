@@ -2,7 +2,9 @@
 // commands and the sync methods; everything else is skipped for now.
 #include "rsx.h"
 
+#include <algorithm>
 #include <chrono>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -27,12 +29,29 @@ enum : uint32_t {
     GCM_FLIP_COMMAND = 0xFEAC,
 };
 
+// diagnostics: per-method counts, printed once after 600 flips
+static uint32_t g_method_count[0x4000];
+static void dump_method_histogram() {
+    std::vector<std::pair<uint32_t, uint32_t>> v;
+    for (uint32_t i = 0; i < 0x4000; ++i)
+        if (g_method_count[i]) v.push_back({g_method_count[i], i * 4});
+    std::sort(v.rbegin(), v.rend());
+    std::string out;
+    char buf[48];
+    for (size_t k = 0; k < v.size() && k < 80; ++k) {
+        snprintf(buf, sizeof(buf), " %04X:%u", v[k].second, v[k].first);
+        out += buf;
+    }
+    LOG_I("rsx", "method histogram (offset:count, %zu distinct):%s", v.size(), out.c_str());
+}
+
 static void rsx_thread() {
     uint32_t ctrl = g_rsx.control_addr;
     uint32_t sem_offset_406e = 0, sem_offset_4097 = 0;
     std::vector<uint32_t> call_stack;
     uint64_t methods = 0;
     LOG_I("rsx", "command processor started (control 0x%08X, io 0x%08X+0x%X)", ctrl, g_rsx.io_addr, g_rsx.io_size);
+    if (!rsx_render_init()) LOG_E("rsx", "renderer unavailable - commands are processed without drawing");
     while (g_rsx.running) {
         uint32_t put = vm::read32(ctrl + 0), get = vm::read32(ctrl + 4);
         if (put == get) {
@@ -76,6 +95,8 @@ static void rsx_thread() {
             uint32_t m = non_inc ? method : method + 4 * i;
             uint32_t arg = vm::read32(addr + 4 + 4 * i);
             ++methods;
+            ++g_method_count[(m >> 2) & 0x3FFF];
+            rsx_render_method(m, arg);
             switch (m) {
                 case NV406E_SET_REFERENCE: vm::write32(ctrl + 8, arg); break;
                 case NV406E_SEMAPHORE_OFFSET: sem_offset_406e = arg; break;
@@ -101,6 +122,8 @@ static void rsx_thread() {
                 case NV4097_TEXTURE_READ_SEMAPHORE_RELEASE: vm::write32(g_rsx.label_addr + sem_offset_4097, arg); break;
                 case GCM_FLIP_COMMAND: {
                     uint32_t n = ++g_rsx.flips;
+                    if (n == 600) dump_method_histogram();
+                    rsx_render_flip(arg);
                     if (n <= 3 || n % 300 == 0) LOG_I("rsx", "flip #%u (buffer %u), %llu methods so far", n, arg,
                                                       (unsigned long long)methods);
                     break;
