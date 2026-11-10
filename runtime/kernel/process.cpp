@@ -227,6 +227,23 @@ void dump_trace(PPCContext& ctx) {
     fprintf(stderr, "\n  r1=%08llX r2=%08llX r3=%016llX r4=%016llX lr=%08llX ctr=%08llX\n",
             (unsigned long long)ctx.r[1], (unsigned long long)ctx.r[2], (unsigned long long)ctx.r[3],
             (unsigned long long)ctx.r[4], (unsigned long long)ctx.lr, (unsigned long long)ctx.ctr);
+    for (int i = 0; i < 32; i += 4)
+        fprintf(stderr, "  r%-2d %016llX  r%-2d %016llX  r%-2d %016llX  r%-2d %016llX\n", i,
+                (unsigned long long)ctx.r[i], i + 1, (unsigned long long)ctx.r[i + 1], i + 2,
+                (unsigned long long)ctx.r[i + 2], i + 3, (unsigned long long)ctx.r[i + 3]);
+    // Guest call stack: PPC64 frames hold the back chain at 0(r1); each function
+    // saves its return address in its caller's frame at +0x10.
+    fprintf(stderr, "  guest call stack (return addresses):");
+    uint32_t sa = vm::area_base(vm::Area::Stack), se = sa + vm::area_size(vm::Area::Stack);
+    uint32_t frame = (uint32_t)ctx.r[1];
+    for (int depth = 0; depth < 24; ++depth) {
+        if (frame < sa || frame + 0x18 > se || (frame & 7)) break;
+        uint32_t next = (uint32_t)vm::read64(frame);
+        if (next <= frame || next < sa || next + 0x18 > se) break;
+        fprintf(stderr, " %08X", (uint32_t)vm::read64(next + 0x10));
+        frame = next;
+    }
+    fprintf(stderr, "\n");
 }
 
 // ---------------------------------------------------------------- HLE callbacks

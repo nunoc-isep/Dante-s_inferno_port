@@ -209,15 +209,33 @@ jobs into LS 0x4000 and runs them. Analyse it with
 clock (one 256-sample block every 5.33 ms + notify events). Output is silent
 for now.
 
-Boot progress (2026-11-09): past SPURS and audio init - pads, game data, NP,
-**three frame flips**, audio DAC thread running, MoviePlayer2 decode thread
-started. Current stop: the PPU "Job Manager - Job Thread" allocates from a pool
-whose capacity is 0 (`0x8859B0`, null slot dereference) - something earlier
-that sizes that pool still gets a stubbed answer.
+Boot progress (2026-11-09): **the game reaches its main loop and runs stably**
+- no crashes over repeated 60 s runs, ~66 frame flips per second (3,300 in
+50 s), 15 PPU threads (Presentation, TextureWorker, audio DAC, MoviePlayer2
+decode, Job Manager, ...), 6 SPU threads (2 Job Manager + 4 EARS audio). There
+is no picture yet because RSX drawing is not implemented.
+
+Two bugs found on the way, both worth remembering:
+- **Atomics must reserve whole 128-byte lines.** A PPU `stwcx.` must fail if
+  *any* store hit the line since `lwarx` (including SPU PUTLLC/PUT to another
+  word of it). The first implementation compared only the reserved word, which
+  let the PPU/SPU job queues corrupt each other (random crashes, SPU job
+  assertions). Now `runtime/kernel/reservation.cpp` keeps a version per line,
+  shared by PPU store-conditionals and SPU MFC writes (`tests/atomic_test.cpp`).
+- **HLE must write exactly the struct size.** Games keep these structs on the
+  stack; `cellSysutilGetBgmPlaybackStatus` clearing 0x30 instead of 0x20 bytes
+  overwrote a caller's saved r28 and crashed far away in `main`.
+
+Debugging aids: crash reports show all GPRs and the guest call stack (walked
+through PPC64 back chains); an SPU that halts or hits an invalid instruction
+saves `spu_<id>_<pc>.ls/.regs`; `--dump-after N` lists PPU and SPU threads.
+
+Input: controller 0 is mapped to the keyboard while the console window has
+focus (arrows, Enter = START, Backspace = SELECT, Z/X/A/S = cross/circle/
+square/triangle, Q/W = L1/R1, 1/2 = L2/R2).
 
 ## Next steps
-- [ ] Find what sizes the Job Manager pool at 0x8859B0 (current crash)
 - [ ] Audio output to a host device (WASAPI) from the cellAudio ports
-- [ ] RSX: real rendering (NV4097 3D methods -> Vulkan/D3D12)
-- [ ] cellPad / input, cellAudio, save data, remaining HLE (237 imports still default stubs)
+- [ ] **Window + RSX rendering** (NV4097 3D methods -> Vulkan/D3D12) - the next milestone
+- [ ] Save data, game data, NP (offline answers), remaining HLE (~195 imports still default stubs)
 - [ ] SPU performance: static recompilation of the SPU images (same approach as the PPU)

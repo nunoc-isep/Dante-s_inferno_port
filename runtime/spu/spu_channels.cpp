@@ -6,7 +6,9 @@
 #include "../kernel/sync.h"
 #include "spu.h"
 
-static std::mutex g_rsv_mutex;  // serialises SPU atomic (128-byte reservation) operations
+// 128-byte line reservations shared with the PPU (runtime/kernel/reservation.cpp)
+std::mutex& ppc_atomic_lock();
+void ppc_line_touch(uint32_t ea, uint32_t size);
 
 enum : uint32_t {
     MFC_PUTLLC_SUCCESS = 0, MFC_PUTLLC_FAILURE = 1, MFC_PUTLLUC_SUCCESS = 2, MFC_GETLLAR_SUCCESS = 4,
@@ -37,6 +39,7 @@ static void dma(SpuThread& t, bool put, uint32_t lsa, uint32_t ea, uint32_t size
     if (put) {
         vm::commit(ea, size);  // no-op when already committed; keeps a bad EA from crashing the host
         memcpy(vm::ptr(ea), t.ls + lsa, size);
+        ppc_line_touch(ea, size);  // a PUT breaks PPU reservations on the lines it writes
     } else {
         memcpy(t.ls + lsa, vm::ptr(ea), size);
     }
@@ -71,7 +74,7 @@ static void mfc_command(SpuThread& t, uint32_t cmd) {
             break;
         case 0xD0: {  // GETLLAR
             uint32_t line = ea & ~127u;
-            std::lock_guard<std::mutex> lk(g_rsv_mutex);
+            std::lock_guard<std::mutex> lk(ppc_atomic_lock());
             memcpy(t.rsv_data, vm::ptr(line), 128);
             memcpy(t.ls + (lsa & 0x3FF80), t.rsv_data, 128);
             t.rsv_addr = line;
@@ -81,17 +84,21 @@ static void mfc_command(SpuThread& t, uint32_t cmd) {
         }
         case 0xB4: {  // PUTLLC
             uint32_t line = ea & ~127u;
-            std::lock_guard<std::mutex> lk(g_rsv_mutex);
+            std::lock_guard<std::mutex> lk(ppc_atomic_lock());
             bool ok = t.rsv_valid && t.rsv_addr == line && memcmp(vm::ptr(line), t.rsv_data, 128) == 0;
-            if (ok) memcpy(vm::ptr(line), t.ls + (lsa & 0x3FF80), 128);
+            if (ok) {
+                memcpy(vm::ptr(line), t.ls + (lsa & 0x3FF80), 128);
+                ppc_line_touch(line, 128);
+            }
             t.rsv_valid = false;
             t.atomic_stat = ok ? MFC_PUTLLC_SUCCESS : MFC_PUTLLC_FAILURE;
             break;
         }
         case 0xB0: case 0xB8: {  // PUTLLUC, PUTQLLUC
             uint32_t line = ea & ~127u;
-            std::lock_guard<std::mutex> lk(g_rsv_mutex);
+            std::lock_guard<std::mutex> lk(ppc_atomic_lock());
             memcpy(vm::ptr(line), t.ls + (lsa & 0x3FF80), 128);
+            ppc_line_touch(line, 128);
             if (t.rsv_addr == line) t.rsv_valid = false;
             t.atomic_stat = MFC_PUTLLUC_SUCCESS;
             break;

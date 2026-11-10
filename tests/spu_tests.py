@@ -209,7 +209,8 @@ def main():
     open(src, "w").write("\n".join(out) + "\n")
     rt = os.path.join(root, "runtime")
     srcs = [src, os.path.join(rt, "spu", "spu_interp.cpp"), os.path.join(rt, "spu", "spu_channels.cpp"),
-            os.path.join(rt, "kernel", "memory.cpp"), os.path.join(rt, "kernel", "sync.cpp")]
+            os.path.join(rt, "kernel", "memory.cpp"), os.path.join(rt, "kernel", "sync.cpp"),
+            os.path.join(rt, "kernel", "reservation.cpp")]
     # minimal stand-ins for the parts of the runtime the SPU code links against
     stub = os.path.join(root, "build", "spu_test_stubs.cpp")
     open(stub, "w").write('#include "kernel/kernel.h"\n'

@@ -78,6 +78,7 @@ struct PPCContext {
     // load-reserve state (lwarx/ldarx)
     uint32_t reserve_addr;
     uint64_t reserve_value;
+    uint32_t reserve_version;  // version of the reserved 128-byte line at lwarx time
     bool reserve_valid;
     // diagnostics: ring buffer of the most recently entered guest functions
     uint32_t trace_pos;
@@ -173,34 +174,29 @@ static inline void ppc_stf32(uint8_t* p, float f) { uint32_t u; memcpy(&u, &f, 4
 #define PPC_DCBZ(ea) memset(base + ((uint32_t)(ea) & ~127u), 0, 128)  // Cell cache line = 128
 #define PPC_FENCE() std::atomic_thread_fence(std::memory_order_seq_cst)
 
-// ---- load-reserve / store-conditional (emulated with CAS on the reserved value)
+// ---- load-reserve / store-conditional on 128-byte lines (runtime/kernel/reservation.cpp)
+uint32_t ppc_line_version(uint32_t ea);
+bool ppc_store_conditional(PPCContext& ctx, uint8_t* base, uint32_t ea, uint64_t v, int size);
 static inline uint64_t ppc_lwarx(PPCContext& ctx, uint8_t* base, uint64_t ea) {
     ctx.reserve_addr = (uint32_t)ea;
-    ctx.reserve_value = ppc_ld32(PPC_ADDR(ea));
+    ctx.reserve_version = ppc_line_version((uint32_t)ea);  // read the version before the data
+    ctx.reserve_value = __atomic_load_n((uint32_t*)PPC_ADDR(ea), __ATOMIC_ACQUIRE);
+    ctx.reserve_value = __builtin_bswap32((uint32_t)ctx.reserve_value);
     ctx.reserve_valid = true;
     return ctx.reserve_value;
 }
 static inline uint64_t ppc_ldarx(PPCContext& ctx, uint8_t* base, uint64_t ea) {
     ctx.reserve_addr = (uint32_t)ea;
-    ctx.reserve_value = ppc_ld64(PPC_ADDR(ea));
+    ctx.reserve_version = ppc_line_version((uint32_t)ea);
+    ctx.reserve_value = __builtin_bswap64(__atomic_load_n((uint64_t*)PPC_ADDR(ea), __ATOMIC_ACQUIRE));
     ctx.reserve_valid = true;
     return ctx.reserve_value;
 }
 static inline bool ppc_stwcx(PPCContext& ctx, uint8_t* base, uint64_t ea, uint64_t v) {
-    if (!ctx.reserve_valid || ctx.reserve_addr != (uint32_t)ea) return false;
-    ctx.reserve_valid = false;
-    uint32_t expected = __builtin_bswap32((uint32_t)ctx.reserve_value);
-    uint32_t desired = __builtin_bswap32((uint32_t)v);
-    return __atomic_compare_exchange_n((uint32_t*)PPC_ADDR(ea), &expected, desired, false,
-                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return ppc_store_conditional(ctx, base, (uint32_t)ea, v, 4);
 }
 static inline bool ppc_stdcx(PPCContext& ctx, uint8_t* base, uint64_t ea, uint64_t v) {
-    if (!ctx.reserve_valid || ctx.reserve_addr != (uint32_t)ea) return false;
-    ctx.reserve_valid = false;
-    uint64_t expected = __builtin_bswap64(ctx.reserve_value);
-    uint64_t desired = __builtin_bswap64(v);
-    return __atomic_compare_exchange_n((uint64_t*)PPC_ADDR(ea), &expected, desired, false,
-                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return ppc_store_conditional(ctx, base, (uint32_t)ea, v, 8);
 }
 #define PPC_LWARX(ea) ppc_lwarx(ctx, base, (ea))
 #define PPC_LDARX(ea) ppc_ldarx(ctx, base, (ea))

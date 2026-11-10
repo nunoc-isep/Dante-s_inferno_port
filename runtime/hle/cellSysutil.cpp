@@ -47,19 +47,20 @@ HLE_FUNC(cellSysutil, cellAudioOutGetSoundAvailability) {
     ctx.r[3] = type == 0 ? 2 : 0;
 }
 HLE_FUNC(cellSysutil, cellAudioOutConfigure) { RET(CELL_OK); }
-// CellAudioOutDeviceInfo (0x4C bytes): portType, availableModeCount, state, reserved[3], latency, availableModes[16]...
+// CellAudioOutDeviceInfo (0x88 bytes): u8 portType, availableModeCount, state, reserved[3]; u16 latency;
+//   CellAudioOutSoundMode availableModes[16] at +8 (each: u8 type, channel, fs, reserved; u32 layout)
 HLE_FUNC(cellSysutil, cellAudioOutGetDeviceInfo) {
     uint32_t p = ARG32(2);
-    memset(vm::ptr(p), 0, 0x4C);
+    memset(vm::ptr(p), 0, 0x88);
     vm::write8(p + 0, 0);   // HDMI
     vm::write8(p + 1, 1);   // one mode
     vm::write8(p + 2, 2);   // available
     vm::write16(p + 6, 1000);
     // mode 0: type LPCM, 2 channels, 48 kHz
-    vm::write8(p + 0x0C, 0);
-    vm::write8(p + 0x0D, 2);
-    vm::write8(p + 0x0E, 4);  // CELL_AUDIO_OUT_FS_48KHZ
-    vm::write32(p + 0x10, 1);  // layout: 2ch
+    vm::write8(p + 8, 0);
+    vm::write8(p + 9, 2);
+    vm::write8(p + 10, 4);  // CELL_AUDIO_OUT_FS_48KHZ
+    vm::write32(p + 12, 1);  // layout: 2ch
     RET(CELL_OK);
 }
 

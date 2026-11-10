@@ -64,6 +64,24 @@ static inline void insert_ctrl(PPCVR& r, uint32_t t, int size) {
     for (int i = 0; i < size; ++i) VB(r, pos + i) = (uint8_t)(i + (size == 1 ? 3 : size == 2 ? 2 : 0));
 }
 
+// Debug aid: write LS + registers of a thread that stopped abnormally to spu_<id>_<pc>.{ls,regs}
+static void dump_state(SpuThread& t, uint32_t pc, const char* why) {
+    char fn[96];
+    snprintf(fn, sizeof(fn), "spu_%08X_%05X.ls", t.id, pc);
+    if (FILE* f = fopen(fn, "wb")) {
+        fwrite(t.ls, 1, 0x40000, f);
+        fclose(f);
+    }
+    snprintf(fn, sizeof(fn), "spu_%08X_%05X.regs", t.id, pc);
+    if (FILE* f = fopen(fn, "w")) {
+        fprintf(f, "%s at pc 0x%05X\n", why, pc);
+        for (int i = 0; i < 128; ++i)
+            fprintf(f, "$%-3d %08X %08X %08X %08X\n", i, VW(t.gpr[i], 0), VW(t.gpr[i], 1), VW(t.gpr[i], 2), VW(t.gpr[i], 3));
+        fclose(f);
+    }
+    LOG_E("spu", "SPU 0x%X: %s at 0x%05X - local store and registers saved to spu_%08X_%05X.*", t.id, why, pc, t.id, pc);
+}
+
 std::string spu_disasm(uint32_t w, uint32_t pc) {
     char buf[96];
     snprintf(buf, sizeof(buf), "%05X: %08X %s", pc, w, g_spu_op_names[g_spu_decode[w >> 21]]);
@@ -162,7 +180,7 @@ uint32_t spu_run(SpuThread& t) {
                 bool h = op == SPU_heqi ? VW(a, 0) == (uint32_t)I10
                        : op == SPU_hgti ? (int32_t)VW(a, 0) > I10 : VW(a, 0) > (uint32_t)I10;
                 if (h) {
-                    LOG_E("spu", "SPU 0x%X halt instruction at 0x%05X", t.id, pc);
+                    dump_state(t, pc, "halt instruction");
                     t.pc = pc;
                     return 0xFFFFFFFF;
                 }
@@ -218,7 +236,7 @@ uint32_t spu_run(SpuThread& t) {
                 break;
             }
             case SPU_stopd:
-                LOG_E("spu", "SPU 0x%X stopd at 0x%05X", t.id, pc);
+                dump_state(t, pc, "stopd");
                 t.pc = pc;
                 return 0xFFFFFFFE;
             case SPU_lnop: case SPU_nop: case SPU_sync: case SPU_dsync: case SPU_hbr: break;
@@ -318,7 +336,7 @@ uint32_t spu_run(SpuThread& t) {
                 bool h = op == SPU_heq ? VW(a, 0) == VW(b, 0)
                        : op == SPU_hgt ? (int32_t)VW(a, 0) > (int32_t)VW(b, 0) : VW(a, 0) > VW(b, 0);
                 if (h) {
-                    LOG_E("spu", "SPU 0x%X halt instruction at 0x%05X", t.id, pc);
+                    dump_state(t, pc, "halt instruction");
                     t.pc = pc;
                     return 0xFFFFFFFF;
                 }
@@ -452,7 +470,7 @@ uint32_t spu_run(SpuThread& t) {
 
             case SPU_INVALID:
             default:
-                LOG_E("spu", "SPU 0x%X: invalid instruction 0x%08X at 0x%05X", t.id, w, pc);
+                dump_state(t, pc, "invalid instruction");
                 t.pc = pc;
                 return 0xFFFFFFFD;
         }
