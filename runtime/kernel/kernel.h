@@ -106,6 +106,9 @@ int thread_detach(uint32_t id);
 uint32_t tls_alloc_for_thread();  // returns r13 value
 void dump_trace(PPCContext& ctx);
 void dump_all_threads();
+void perf_report(double seconds, uint32_t flips);
+extern bool g_perf_enabled;
+extern std::atomic<uint32_t> g_perf_tex_uploads;
 
 // Call a guest function by code address on the current thread (used by HLE callbacks).
 void call_guest(PPCContext& ctx, uint32_t code_addr);

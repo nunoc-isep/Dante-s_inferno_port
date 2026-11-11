@@ -1,6 +1,8 @@
 // ELF loading, PPU threads, TLS, syscall dispatch and crash diagnostics.
 #include <windows.h>
 
+#include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <map>
 #include <memory>
@@ -82,6 +84,8 @@ struct GuestThread {
     std::atomic<bool> finished{false};
     uint64_t exit_status = 0;
     bool detached = false;
+    uint64_t sc_time_us[1024] = {};  // --perf: time spent inside each syscall
+    uint32_t sc_count[1024] = {};
 };
 
 static std::mutex g_threads_mutex;
@@ -158,6 +162,8 @@ uint32_t thread_create(uint32_t entry_opd, uint64_t arg, int prio, uint32_t stac
     if (!is_main) {
         // 256 MB host stack reservation: guest recursion becomes host recursion.
         t->handle = CreateThread(nullptr, 256ull << 20, thread_main, t, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+        void hostprof_add_thread(void* handle, const std::string& name);  // spu_lv2.cpp (--spu-profile)
+        hostprof_add_thread(t->handle, name);
     }
     return t->id;
 }
@@ -206,6 +212,74 @@ int thread_detach(uint32_t id) {
 }
 
 void (*g_spu_dump_hook)() = nullptr;
+void (*g_spu_perf_hook)(double) = nullptr;
+bool g_perf_enabled = false;
+std::atomic<uint32_t> g_perf_tex_uploads{0};
+
+static uint64_t thread_cpu(HANDLE h) {
+    FILETIME c, e, k, u;
+    if (!h || !GetThreadTimes(h, &c, &e, &k, &u)) return 0;
+    return ((uint64_t)k.dwHighDateTime << 32 | k.dwLowDateTime) + ((uint64_t)u.dwHighDateTime << 32 | u.dwLowDateTime);
+}
+
+struct SyscallEntry {
+    const char* name;
+    SyscallFn fn;
+};
+static SyscallEntry* g_syscalls();
+
+// --perf N: every N seconds print frame rate, texture uploads and per-thread CPU usage
+void perf_report(double seconds, uint32_t flips) {
+    static uint32_t last_flips = 0, last_tex = 0;
+    static std::map<uint32_t, uint64_t> last_cpu;
+    uint32_t tex = g_perf_tex_uploads;
+    LOG_I("perf", "%.1f fps presented, %.1f texture uploads/s", (flips - last_flips) / seconds, (tex - last_tex) / seconds);
+    last_flips = flips;
+    last_tex = tex;
+    {
+        std::lock_guard<std::mutex> lk(g_threads_mutex);
+        for (auto& [id, t] : g_threads) {
+            if (t->finished) continue;
+            uint64_t cpu = thread_cpu(t->handle);
+            double pct = 100.0 * (cpu - last_cpu[id]) / (seconds * 1e7);
+            last_cpu[id] = cpu;
+            uint64_t waited = 0;
+            for (uint32_t k = 0; k < 1024; ++k) waited += t->sc_time_us[k];
+            if (pct < 1.0 && !waited) continue;
+            // the three syscalls this thread spent most wall time in
+            std::vector<std::pair<uint64_t, uint32_t>> sc;
+            for (uint32_t k = 0; k < 1024; ++k)
+                if (t->sc_time_us[k]) sc.push_back({t->sc_time_us[k], k});
+            std::sort(sc.rbegin(), sc.rend());
+            std::string top;
+            char b[96];
+            for (size_t k = 0; k < sc.size() && k < 3; ++k) {
+                snprintf(b, sizeof(b), " %s %.0f%% (%u calls)", g_syscalls()[sc[k].second].name ? g_syscalls()[sc[k].second].name : "?",
+                         100.0 * sc[k].first / (seconds * 1e6), t->sc_count[sc[k].second]);
+                top += b;
+            }
+            LOG_I("perf", "  PPU %-34s CPU %5.1f%%  waits:%s", t->name.empty() ? "(unnamed)" : t->name.c_str(), pct, top.c_str());
+            if (pct > 50.0) {  // busy thread: which guest functions it entered most recently
+                std::map<uint32_t, uint32_t> fns;
+                for (uint32_t k = 0; k < 64; ++k)
+                    if (t->ctx.trace[k]) ++fns[t->ctx.trace[k]];
+                std::string s;
+                for (auto& [a, n] : fns) {
+                    snprintf(b, sizeof(b), " %08X:%u", a, n);
+                    s += b;
+                }
+                LOG_I("perf", "      recent guest functions:%s", s.c_str());
+            }
+            memset(t->sc_time_us, 0, sizeof(t->sc_time_us));
+            memset(t->sc_count, 0, sizeof(t->sc_count));
+        }
+    }
+    if (g_spu_perf_hook) g_spu_perf_hook(seconds);
+    void audio_perf_report(double);
+    audio_perf_report(seconds);
+    void rsx_tex_perf_report(double);
+    rsx_tex_perf_report(seconds);
+}
 
 void dump_all_threads() {
     if (g_spu_dump_hook) g_spu_dump_hook();
@@ -305,10 +379,6 @@ struct CrashHandlerInstaller {
 } g_crash_handler_installer;
 
 // ---------------------------------------------------------------- syscalls
-struct SyscallEntry {
-    const char* name;
-    SyscallFn fn;
-};
 static SyscallEntry* g_syscalls() {
     static SyscallEntry table[1024];
     return table;
@@ -324,7 +394,15 @@ void ppc_syscall(PPCContext& ctx, uint8_t*, uint32_t addr) {
     if (n < 1024 && e.fn) {
         LOG_T("lv2", "%s(0x%llX, 0x%llX, 0x%llX, 0x%llX) @%08X", e.name, (unsigned long long)ctx.r[3],
               (unsigned long long)ctx.r[4], (unsigned long long)ctx.r[5], (unsigned long long)ctx.r[6], addr);
-        e.fn(ctx);
+        GuestThread* t = (GuestThread*)ctx.thread;
+        if (g_perf_enabled && t) {
+            auto t0 = std::chrono::steady_clock::now();
+            e.fn(ctx);
+            t->sc_time_us[n] += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+            ++t->sc_count[n];
+        } else {
+            e.fn(ctx);
+        }
         return;
     }
     static std::mutex m;

@@ -10,6 +10,8 @@
 
 #include "../kernel/kernel.h"
 
+void host_sleep_us(uint64_t us);  // ppc_runtime.cpp: accurate short sleeps
+
 RsxState g_rsx;
 
 uint32_t rsx_io_to_addr(uint32_t offset) {
@@ -121,6 +123,14 @@ static void rsx_thread() {
                     break;
                 case NV4097_TEXTURE_READ_SEMAPHORE_RELEASE: vm::write32(g_rsx.label_addr + sem_offset_4097, arg); break;
                 case GCM_FLIP_COMMAND: {
+                    // the PS3 flips on a 59.94 Hz vblank: never show frames faster than that, even
+                    // on a high-refresh monitor (game timing may assume it)
+                    static auto next_vblank = std::chrono::steady_clock::now();
+                    constexpr auto kFrame = std::chrono::microseconds(16683);
+                    auto now = std::chrono::steady_clock::now();
+                    if (now < next_vblank)
+                        host_sleep_us((uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(next_vblank - now).count());
+                    next_vblank = std::max(next_vblank + kFrame, now);  // resync after a slow frame
                     uint32_t n = ++g_rsx.flips;
                     if (n == 600) dump_method_histogram();
                     rsx_render_flip(arg);

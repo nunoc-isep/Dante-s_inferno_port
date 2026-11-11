@@ -6,3 +6,5 @@ analysis/
 __pycache__/
 build/
 userdata/
+spu_*.ls
+spu_*.regs

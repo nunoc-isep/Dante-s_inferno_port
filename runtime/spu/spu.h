@@ -65,6 +65,7 @@ struct SpuThread {
     uint32_t tag_mask = 0, atomic_stat = 0;
     bool rsv_valid = false;
     uint32_t rsv_addr = 0;
+    uint32_t rsv_version = 0;  // line version at GETLLAR: any later store to the line loses the reservation
     alignas(16) uint8_t rsv_data[128];
 
     // lv2 side
@@ -77,6 +78,18 @@ struct SpuThread {
     bool exited = false;
     uint32_t exit_status = 0;
     uint64_t insn_count = 0;
+    void* host_handle = nullptr;  // Win32 handle of the host thread running this SPU (perf accounting)
+    uint32_t* profile = nullptr;  // --spu-profile: samples per LS word (pc >> 2), every 256 instructions
+    uint8_t** native_states = nullptr;  // per recompiled image: validity of each code range (spu_native.cpp)
+    uint32_t native_image = 0;
+    uint64_t native_calls = 0;
+    uint64_t native_insn = 0;
+    uint64_t native_validations = 0;
+    uint32_t ls_src[64] = {};
+    void* ls_ov[64] = {};             // --spu-profile: overlay record (spu_lv2.cpp) that last filled each LS page
+    volatile uint32_t native_pc = 0;  // block being executed by recompiled code (profiling)
+    void* interp_pages = nullptr;     // --spu-profile: set of (LS page, source EA) pairs seen by the interpreter
+    uint32_t* native_profile = nullptr;  // diagnostics: main-memory source of the last DMA into each 4 KB LS page  // instructions executed by recompiled code (also counted in insn_count)
     const char* state = "running";  // diagnostics: what the thread is blocked on
     std::thread host;
 
@@ -94,7 +107,19 @@ uint32_t spu_channel_count(SpuThread& t, uint32_t ch);
 // stop-and-signal: returns true to continue execution after the stop instruction
 bool spu_stop(SpuThread& t, uint32_t code);
 std::string spu_disasm(uint32_t w, uint32_t pc);
+// Recompiled SPU images (spu_native.cpp + generated code): available when pc is an entry of an
+// image whose code is currently present in this thread's LS. spu_run_native returns 0 with t.pc
+// set when execution leaves translated code, or SPU_EXIT(code) when the thread stops.
+bool spu_native_available(SpuThread& t, uint32_t pc);
+uint64_t spu_run_native(SpuThread& t, uint32_t pc);
+void spu_native_ls_written(SpuThread& t, uint32_t lsa, uint32_t size);
 void spu_dump_all();
+void spu_register_host_thread(SpuThread& t);
+void spu_perf_report(double seconds);
+extern bool g_spu_profile;
+// --spu-profile: DMA from the EBOOT image into LS (SPU code overlays); written to spu_overlays.txt
+void spu_note_overlay(SpuThread& t, uint32_t ea, uint32_t lsa, uint32_t size);
+void spu_note_overlay_exec(void* ov);
 // Create an SPU thread object registered with the kernel (id, diagnostics) but not started.
 std::shared_ptr<SpuThread> spu_create_thread(const std::string& name, uint32_t spu_num);
 // Stop codes 0x3F00-0x3FFF are reserved for HLE kernels (e.g. SPURS): spu_run returns them silently.

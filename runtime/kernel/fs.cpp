@@ -2,6 +2,7 @@
 //   /dev_bdvd/...  -> <game root>/...
 //   /app_home/...  -> <game root>/PS3_GAME/USRDIR/...
 //   /dev_hdd0/...  -> <user root>/dev_hdd0/...  (also dev_hdd1, dev_usb000)
+#include <windows.h>
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>

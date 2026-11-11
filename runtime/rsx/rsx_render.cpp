@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -266,6 +267,13 @@ ID3D11PixelShader* get_ps(uint32_t& tex_used) {
 }
 
 // ---------------------------------------------------------------- textures
+// --perf: texture uploads per guest address in the last interval
+struct TexPerf {
+    uint32_t w = 0, h = 0, fmt = 0, uploads = 0;
+};
+static std::mutex g_tex_perf_mutex;
+static std::map<uint32_t, TexPerf> g_tex_perf;
+
 struct TexEntry {
     ID3D11Texture2D* tex = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
@@ -383,8 +391,18 @@ ID3D11ShaderResourceView* get_texture(int t) {
     }
     g_gpu.ctx->UpdateSubresource(e.tex, 0, nullptr, out.data(), out_pitch, 0);
     e.hash = hash;
+    ++g_perf_tex_uploads;
+    if (g_perf_enabled) {
+        std::lock_guard<std::mutex> lk(g_tex_perf_mutex);
+        TexPerf& tp = g_tex_perf[addr];
+        tp.w = w;
+        tp.h = h;
+        tp.fmt = f;
+        ++tp.uploads;
+    }
     return e.srv;
 }
+
 
 D3D11_TEXTURE_ADDRESS_MODE wrap_mode(uint32_t m) {
     switch (m) {
@@ -709,6 +727,18 @@ void clear(uint32_t mask) {
 }
 
 }  // namespace
+
+void rsx_tex_perf_report(double seconds) {
+    std::lock_guard<std::mutex> lk(g_tex_perf_mutex);
+    std::string s;
+    for (auto& [a, tp] : g_tex_perf) {
+        char b[96];
+        snprintf(b, sizeof(b), " %08X(%ux%u f%02X):%.1f/s", a, tp.w, tp.h, tp.fmt, tp.uploads / seconds);
+        s += b;
+    }
+    if (!s.empty()) LOG_I("perf", "  texture uploads by address:%s", s.c_str());
+    g_tex_perf.clear();
+}
 
 bool rsx_render_init() {
     if (!gpu_init()) return false;

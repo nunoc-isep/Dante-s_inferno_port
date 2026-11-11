@@ -75,6 +75,7 @@ int select_workload(Spurs& s) {
 
 void spurs_kernel(std::shared_ptr<Spurs> s, uint32_t idx) {
     SpuThread& t = *s->spus[idx];
+    spu_register_host_thread(t);
     LOG_I("spurs", "SPU kernel %u started (SPU thread 0x%X)", idx, t.id);
     for (;;) {
         int wid;
@@ -99,6 +100,7 @@ void spurs_kernel(std::shared_ptr<Spurs> s, uint32_t idx) {
         ppc_st32(t.ls + kExitAddr, kStopExit);   // "stop kStopExit" traps a module return
         ppc_st32(t.ls + kSelectAddr, kStopSelect);
         memcpy(t.ls + 0xA00, vm::ptr(w.pm), std::min<uint32_t>(w.size, 0x40000 - 0xA00));
+        spu_native_ls_written(t, 0, 0x40000);
         memset(t.gpr, 0, sizeof(t.gpr));
         VW(t.gpr[0], 0) = kExitAddr;
         VW(t.gpr[1], 0) = 0x3FFB0;

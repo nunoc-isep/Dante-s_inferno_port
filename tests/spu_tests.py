@@ -210,7 +210,8 @@ def main():
     rt = os.path.join(root, "runtime")
     srcs = [src, os.path.join(rt, "spu", "spu_interp.cpp"), os.path.join(rt, "spu", "spu_channels.cpp"),
             os.path.join(rt, "kernel", "memory.cpp"), os.path.join(rt, "kernel", "sync.cpp"),
-            os.path.join(rt, "kernel", "reservation.cpp")]
+            os.path.join(rt, "kernel", "reservation.cpp"), os.path.join(rt, "spu", "spu_native.cpp"),
+            os.path.join(root, "tests", "spu_images_stub.cpp")]
     # minimal stand-ins for the parts of the runtime the SPU code links against
     stub = os.path.join(root, "build", "spu_test_stubs.cpp")
     open(stub, "w").write('#include "kernel/kernel.h"\n'
@@ -220,9 +221,14 @@ def main():
                           "int thread_join(uint32_t, uint64_t*) { return 0; }\n"
                           "int thread_detach(uint32_t) { return 0; }\n"
                           "void thread_exit(uint64_t) { throw 0; }\n"
-                          "void syscall_register(uint32_t, const char*, SyscallFn) {}\n")
-    subprocess.check_call(["clang++", "-std=c++20", "-O1", "-w", "-I", rt, *srcs, stub, "-o", exe, "-static",
-                           "-Wl,--whole-archive", "-lpthread", "-Wl,--no-whole-archive"])
+                          "void syscall_register(uint32_t, const char*, SyscallFn) {}\n"
+                          '#include "spu/spu.h"\n'
+                          "bool g_spu_profile = false;\n"
+                          "void spu_note_overlay(SpuThread&, uint32_t, uint32_t, uint32_t) {}\n"
+                          "void spu_note_overlay_exec(void*) {}\n"
+                          "void host_sleep_us(uint64_t) {}\n")
+    subprocess.check_call(["clang++", "-std=c++20", "-march=x86-64-v3", "-O1", "-w", "-I", rt, *srcs, stub, "-o", exe, "-static",
+                           "-Wl,--whole-archive", "-lpthread", "-Wl,--no-whole-archive", "-lsynchronization"])
     return subprocess.call([exe])
 
 

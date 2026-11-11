@@ -1,4 +1,7 @@
 // Core services the recompiled code calls into: indirect calls, traps, HLE fallbacks.
+#include <windows.h>
+#include <intrin.h>
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -68,9 +71,62 @@ void ppc_hle_unimplemented(const char* lib, const char* name, uint32_t nid, PPCC
     ctx.r[3] = 0;
 }
 
+namespace {
+// PS3 timebase runs at 79.8 MHz. It is read very often (PPU mftb, the SPU job kernel polls the
+// decrementer millions of times a second), so use the invariant TSC - one rdtsc and a multiply -
+// calibrated once against QueryPerformanceCounter.
+struct Timebase {
+    double scale;  // timebase ticks per TSC tick
+    uint64_t tsc0;
+    uint64_t tb0;
+    Timebase() {
+        LARGE_INTEGER f, q0, q1;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&q0);
+        uint64_t t0 = __rdtsc();
+        do QueryPerformanceCounter(&q1);
+        while (q1.QuadPart - q0.QuadPart < f.QuadPart / 50);  // 20 ms
+        uint64_t t1 = __rdtsc();
+        double secs = (double)(q1.QuadPart - q0.QuadPart) / (double)f.QuadPart;
+        scale = 79800000.0 * secs / (double)(t1 - t0);
+        tsc0 = t1;
+        tb0 = (uint64_t)((double)q1.QuadPart * 79800000.0 / (double)f.QuadPart);
+    }
+};
+const Timebase& timebase() {
+    static const Timebase tb;
+    return tb;
+}
+const Timebase& g_tb_init = timebase();  // calibrate at startup, not on the first guest read
+}  // namespace
+
+// Accurate short sleeps. MinGW's std::this_thread::sleep_for returns at once for sub-millisecond
+// times and std::condition_variable::wait_for rounds up to the ~15 ms system tick, so guest
+// usleep() and SPU event polling use a high-resolution waitable timer (~0.5 ms granularity) for
+// the bulk of the wait and yield the last stretch away.
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+void host_sleep_us(uint64_t us) {
+    if (!us) {
+        SwitchToThread();
+        return;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
+    if (us >= 1500) {
+        if (HANDLE h = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS)) {
+            LARGE_INTEGER due;
+            due.QuadPart = -(LONGLONG)(us - 1000) * 10;  // the timer overshoots by up to ~1 ms
+            if (SetWaitableTimer(h, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(h, INFINITE);
+            CloseHandle(h);
+        } else {
+            Sleep((DWORD)(us / 1000 - 1));
+        }
+    }
+    while (std::chrono::steady_clock::now() < deadline) SwitchToThread();
+}
+
 uint64_t ppc_mftb() {
-    // PS3 timebase runs at 79.8 MHz
-    using namespace std::chrono;
-    auto ns = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
-    return (uint64_t)((unsigned __int128)ns * 79800000ull / 1000000000ull);
+    const Timebase& tb = timebase();
+    return tb.tb0 + (uint64_t)((double)(__rdtsc() - tb.tsc0) * tb.scale);
 }

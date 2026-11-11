@@ -35,13 +35,25 @@ bool init() {
     return true;
 }
 
+// one bit per 4 KB page already committed: commit() is called on hot paths (every SPU DMA PUT),
+// and VirtualAlloc is a kernel call even when the pages are committed
+static std::atomic<uint64_t> g_committed[(0x100000000ull >> 12) / 64];
+
+static bool all_committed(uint64_t lo, uint64_t hi) {
+    for (uint64_t p = lo >> 12; p < (hi >> 12); ++p)
+        if (!((g_committed[p >> 6].load(std::memory_order_relaxed) >> (p & 63)) & 1)) return false;
+    return true;
+}
+
 void commit(uint32_t addr, uint32_t size) {
     if (!size) return;
     uint64_t lo = addr & ~0xFFFull, hi = ((uint64_t)addr + size + 0xFFF) & ~0xFFFull;
+    if (all_committed(lo, hi)) return;
     if (!VirtualAlloc(g_base + lo, (size_t)(hi - lo), MEM_COMMIT, PAGE_READWRITE)) {
         LOG_E("vm", "commit failed at 0x%08X size 0x%X (error %lu)", addr, size, GetLastError());
         abort();
     }
+    for (uint64_t p = lo >> 12; p < (hi >> 12); ++p) g_committed[p >> 6].fetch_or(1ull << (p & 63), std::memory_order_relaxed);
 }
 
 static bool carve(AreaDesc& a, uint32_t start, uint32_t size) {

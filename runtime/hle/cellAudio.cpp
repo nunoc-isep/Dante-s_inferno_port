@@ -11,6 +11,8 @@
 #include "../kernel/kernel.h"
 #include "../kernel/sync.h"
 
+void host_sleep_us(uint64_t us);  // ppc_runtime.cpp: accurate short sleeps
+
 namespace {
 
 constexpr uint32_t kMaxPorts = 8, kBlockSamples = 256;
@@ -41,8 +43,16 @@ void audio_thread() {
     const auto period = std::chrono::nanoseconds(1000000000ull * kBlockSamples / 48000);
     auto next = clock::now();
     for (;;) {
+        // Precise 5.33 ms ticks: the game's audio engine advances its stream clock once per
+        // wake-up (draining extra events), and movies sync video to that clock. A coarse sleep
+        // (std::this_thread::sleep_until rounds up to the ~15.6 ms system tick here) delivered
+        // events in bursts of three and ran audio - and movie playback - at a third of real time.
         next += period;
-        std::this_thread::sleep_until(next);
+        auto now = clock::now();
+        if (next > now)
+            host_sleep_us((uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(next - now).count());
+        else if (now - next > 4 * period)
+            next = now;  // fell far behind (debugger, host stall): resync instead of bursting
         std::vector<uint64_t> keys;
         {
             std::lock_guard<std::mutex> lk(g_mutex);
@@ -66,6 +76,26 @@ void audio_thread() {
 }
 
 }  // namespace
+
+// --perf: audio blocks produced and notify-queue backlog
+void audio_perf_report(double seconds) {
+    static uint64_t last = 0;
+    uint64_t ticks;
+    std::vector<uint64_t> keys;
+    {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        ticks = g_ticks;
+        keys = g_keys;
+    }
+    size_t backlog = 0;
+    for (uint64_t k : keys)
+        if (auto q = event_queue_by_key(k)) {
+            std::lock_guard<std::mutex> lk(q->m);
+            backlog += q->events.size();
+        }
+    LOG_I("perf", "  audio: %.1f blocks/s (expected 187.5), notify queue backlog %zu", (ticks - last) / seconds, backlog);
+    last = ticks;
+}
 
 HLE_FUNC(cellAudio, cellAudioInit) {
     std::lock_guard<std::mutex> lk(g_mutex);

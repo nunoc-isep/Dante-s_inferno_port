@@ -6,7 +6,9 @@
 //   to and above the executable, then next to and above the current folder.
 //   PS3_GAME/USRDIR/EBOOT.elf must be the RPCS3-decrypted executable.
 #include <windows.h>
+#include <timeapi.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -16,6 +18,9 @@
 
 #include "gpu/gpu.h"
 #include "kernel/kernel.h"
+#include "rsx/rsx.h"
+#include "spu/spu.h"
+#include "spu/spu_native.h"
 
 namespace fs = std::filesystem;
 
@@ -62,7 +67,18 @@ int main(int argc, char** argv) {
             snprintf(g_screenshot_list, sizeof(g_screenshot_list), ",%s,", argv[++i]);
             g_screenshot_frame = 1;
         } else if (!strcmp(argv[i], "--rsx-debug") && i + 1 < argc) g_rsx_debug = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--input") && i + 1 < argc) {
+        else if (!strcmp(argv[i], "--spu-profile")) g_spu_profile = true;
+        else if (!strcmp(argv[i], "--no-spu-native")) spu_native_set_enabled(false);
+        else if (!strcmp(argv[i], "--perf") && i + 1 < argc) {
+            int secs = std::max(1, atoi(argv[++i]));
+            g_perf_enabled = true;
+            std::thread([secs] {
+                for (;;) {
+                    std::this_thread::sleep_for(std::chrono::seconds(secs));
+                    perf_report(secs, g_rsx.flips);
+                }
+            }).detach();
+        } else if (!strcmp(argv[i], "--input") && i + 1 < argc) {
             extern char g_input_script[1024];
             snprintf(g_input_script, sizeof(g_input_script), "%s", argv[++i]);
         }
@@ -76,6 +92,9 @@ int main(int argc, char** argv) {
         }
     }
     setvbuf(stdout, nullptr, _IONBF, 0);
+    // 1 ms timer resolution: the default 15.6 ms makes every guest sleep/timeout (and our 5.33 ms
+    // audio clock) far too coarse, which slows down anything paced by time - e.g. movie playback.
+    timeBeginPeriod(1);
 
     if (game_root.empty()) {
         std::vector<fs::path> searched;

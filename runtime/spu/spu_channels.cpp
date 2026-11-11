@@ -1,5 +1,6 @@
 // SPU channel interface: MFC DMA (incl. list and atomic reservation commands),
 // mailboxes, signal notification, events, decrementer, stop-and-signal.
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 
@@ -23,6 +24,12 @@ SpuThread::SpuThread() {
 SpuThread::~SpuThread() { _aligned_free(ls); }
 
 static uint64_t timebase() { return ppc_mftb(); }
+void host_sleep_us(uint64_t us);  // ppc_runtime.cpp: accurate short sleeps
+// reservation.cpp: wake-ups for threads waiting on a reservation-lost event
+int ppc_rsv_wait_register(uint32_t line_addr);
+void ppc_rsv_wait_unregister(int slot);
+uint32_t ppc_rsv_wake_seq();
+void ppc_rsv_wait(uint32_t seen_seq, uint32_t timeout_ms);
 
 // ---------------------------------------------------------------- DMA
 static bool ea_ok(SpuThread& t, uint32_t ea, uint32_t size) {
@@ -42,6 +49,13 @@ static void dma(SpuThread& t, bool put, uint32_t lsa, uint32_t ea, uint32_t size
         ppc_line_touch(ea, size);  // a PUT breaks PPU reservations on the lines it writes
     } else {
         memcpy(t.ls + lsa, vm::ptr(ea), size);
+        spu_native_ls_written(t, lsa, size);
+        for (uint32_t p = lsa >> 12; p <= ((lsa + size - 1) >> 12) && p < 64; ++p)
+            t.ls_src[p] = ea + ((p << 12) - lsa);  // EA that maps to the start of this page
+        if (g_spu_profile) {
+            for (uint32_t p = lsa >> 12; p <= ((lsa + size - 1) >> 12) && p < 64; ++p) t.ls_ov[p] = nullptr;
+            if (ea < 0x01000000) spu_note_overlay(t, ea, lsa, size);  // from the EBOOT image
+        }
     }
 }
 
@@ -75,8 +89,10 @@ static void mfc_command(SpuThread& t, uint32_t cmd) {
         case 0xD0: {  // GETLLAR
             uint32_t line = ea & ~127u;
             std::lock_guard<std::mutex> lk(ppc_atomic_lock());
+            t.rsv_version = ppc_line_version(line);
             memcpy(t.rsv_data, vm::ptr(line), 128);
             memcpy(t.ls + (lsa & 0x3FF80), t.rsv_data, 128);
+            spu_native_ls_written(t, lsa & 0x3FF80, 128);
             t.rsv_addr = line;
             t.rsv_valid = true;
             t.atomic_stat = MFC_GETLLAR_SUCCESS;
@@ -85,7 +101,8 @@ static void mfc_command(SpuThread& t, uint32_t cmd) {
         case 0xB4: {  // PUTLLC
             uint32_t line = ea & ~127u;
             std::lock_guard<std::mutex> lk(ppc_atomic_lock());
-            bool ok = t.rsv_valid && t.rsv_addr == line && memcmp(vm::ptr(line), t.rsv_data, 128) == 0;
+            bool ok = t.rsv_valid && t.rsv_addr == line && ppc_line_version(line) == t.rsv_version &&
+                      memcmp(vm::ptr(line), t.rsv_data, 128) == 0;
             if (ok) {
                 memcpy(vm::ptr(line), t.ls + (lsa & 0x3FF80), 128);
                 ppc_line_touch(line, 128);
@@ -118,7 +135,10 @@ static void mfc_command(SpuThread& t, uint32_t cmd) {
 // ---------------------------------------------------------------- events
 static uint32_t pending_events(SpuThread& t) {
     uint32_t ev = t.event_stat;
-    if (t.rsv_valid && memcmp(vm::ptr(t.rsv_addr), t.rsv_data, 128) != 0) {
+    // lost when the line changed, or when anything (stwcx., another SPU's PUT) stored to it even
+    // with identical data - plain PPU stores do not bump the version, hence the memcmp as well
+    if (t.rsv_valid &&
+        (ppc_line_version(t.rsv_addr) != t.rsv_version || memcmp(vm::ptr(t.rsv_addr), t.rsv_data, 128) != 0)) {
         t.rsv_valid = false;
         t.event_stat |= SPU_EVENT_LR;
         ev |= SPU_EVENT_LR;
@@ -166,7 +186,21 @@ bool spu_read_channel(SpuThread& t, uint32_t ch, uint32_t& value) {
             return true;
         }
         case SPU_RdEventStat: {
+            // Reservation-lost and decrementer events have no direct notifier. Yield-poll for a
+            // short while (low latency), then block: on the reservation line (stwcx./PUT to it wake
+            // us at once; plain PPU stores are caught by the 1 ms timeout), or on a precise sleep
+            // when the decrementer is about to expire.
+            const auto t0 = std::chrono::steady_clock::now();
+            int slot = -1;
+            uint32_t slot_line = 0;
+            struct Unreg {
+                int& s;
+                ~Unreg() { ppc_rsv_wait_unregister(s); }
+            } unreg{slot};
             for (;;) {
+                uint32_t seq = ppc_rsv_wake_seq();
+                uint64_t dec_us = ~0ull;
+                bool lr_wait;
                 {
                     std::unique_lock<std::mutex> lk(t.m);
                     uint32_t ev = pending_events(t) & t.event_mask;
@@ -181,7 +215,26 @@ bool spu_read_channel(SpuThread& t, uint32_t ch, uint32_t& value) {
                     }
                     t.state = "waiting on events (ch0)";
                     if (t.stop_req) return false;
-                    t.cv.wait_for(lk, std::chrono::microseconds(50));
+                    if (t.dec_armed && (t.event_mask & SPU_EVENT_TM)) {
+                        int32_t left = (int32_t)(t.dec_value - (uint32_t)(timebase() - t.dec_start));
+                        dec_us = left > 0 ? (uint64_t)left / 80 : 0;  // 79.8 MHz
+                    }
+                    lr_wait = t.rsv_valid && (t.event_mask & SPU_EVENT_LR);
+                    if (lr_wait && slot_line != t.rsv_addr) {
+                        ppc_rsv_wait_unregister(slot);
+                        slot = ppc_rsv_wait_register(t.rsv_addr);
+                        slot_line = t.rsv_addr;
+                    }
+                }
+                if (std::chrono::steady_clock::now() - t0 < std::chrono::microseconds(50)) {
+                    host_sleep_us(0);  // yield
+                } else if (dec_us < 50) {
+                    host_sleep_us(dec_us);  // about to expire
+                } else {
+                    // Block ~1 ms (or until the reservation line is written). The SPURS policy
+                    // modules poll with sub-millisecond decrementer timeouts; waking a little late
+                    // for a timer is harmless, spinning for it would burn a core per SPU.
+                    ppc_rsv_wait(seq, 1);
                 }
             }
         }

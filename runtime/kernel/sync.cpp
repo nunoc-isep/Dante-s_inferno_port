@@ -1,13 +1,16 @@
 // LV2 synchronisation objects, timers, time, memory and TTY syscalls.
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
 #include <thread>
 
 #include "kernel.h"
@@ -36,7 +39,10 @@ bool kobj_remove(uint32_t id) {
     return g_objects.erase(id) != 0;
 }
 
+void host_sleep_us(uint64_t us);  // ppc_runtime.cpp: accurate short sleeps
+
 static uint32_t self_id() { return thread_id(current_thread()); }
+
 
 // timeout in microseconds, 0 = infinite
 template <typename Pred>
@@ -45,7 +51,22 @@ static bool wait_pred(std::condition_variable& cv, std::unique_lock<std::mutex>&
         cv.wait(lk, pred);
         return true;
     }
-    return cv.wait_for(lk, std::chrono::microseconds(timeout_us), pred);
+    // MinGW's condition_variable timeouts round up to the ~15 ms system tick, which turns guest
+    // polling with short timeouts into 15 ms stalls. Use the condition variable only while more
+    // than a tick is left (a notify still wakes it at once), then poll with precise short sleeps.
+    const auto deadline = Clock::now() + std::chrono::microseconds(timeout_us);
+    for (;;) {
+        if (pred()) return true;
+        long long left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - Clock::now()).count();
+        if (left <= 0) return pred();
+        if (left > 20000) {
+            cv.wait_for(lk, std::chrono::microseconds(left - 16000));
+        } else {
+            lk.unlock();
+            host_sleep_us((uint64_t)std::min<long long>(left, 200));
+            lk.lock();
+        }
+    }
 }
 
 // ---------------------------------------------------------------- mutex
@@ -289,6 +310,7 @@ std::shared_ptr<KEventQueue> event_queue_by_key(uint64_t key) {
     return it == g_eq_by_key.end() ? nullptr : it->second.lock();
 }
 
+
 void KEventQueue::push(uint64_t source, uint64_t d1, uint64_t d2, uint64_t d3) {
     std::unique_lock<std::mutex> lk(m);
     events.push_back({source, d1, d2, d3});
@@ -399,7 +421,7 @@ SYSCALL(138, sys_event_port_send) {
 
 // ---------------------------------------------------------------- timers / time
 SYSCALL(141, sys_timer_usleep) {
-    std::this_thread::sleep_for(std::chrono::microseconds(ARG(0)));
+    host_sleep_us(ARG(0));
     RET(CELL_OK);
 }
 SYSCALL(142, sys_timer_sleep) {

@@ -242,9 +242,9 @@ def main():
     src = os.path.join(root, "build", "insn_tests.cpp")
     exe = os.path.join(root, "build", "insn_tests.exe")
     open(src, "w").write("\n".join(out) + "\n")
-    subprocess.check_call(["clang++", "-std=c++20", "-O1", "-w", "-I", os.path.join(root, "runtime"), src,
+    subprocess.check_call(["clang++", "-std=c++20", "-march=x86-64-v3", "-O1", "-w", "-I", os.path.join(root, "runtime"), src,
                            os.path.join(root, "runtime", "kernel", "reservation.cpp"), "-o", exe, "-static",
-                           "-Wl,--whole-archive", "-lpthread", "-Wl,--no-whole-archive"])
+                           "-Wl,--whole-archive", "-lpthread", "-Wl,--no-whole-archive", "-lsynchronization"])
     return subprocess.call([exe])
 
 
