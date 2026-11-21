@@ -1,17 +1,22 @@
 // cellAudio: audio ports, read indices and the 48 kHz mixing clock.
 // Every 256 samples (5.33 ms) each started port's read index advances one block
 // and every registered notify queue receives an event - the timing contract the
-// game's DAC thread is written against. Output is silent for now (the mixed
-// port data is consumed but not sent to a host device yet).
+// game's DAC thread is written against. The blocks are mixed (port level, 7.1 -> stereo
+// downmix) and sent to the host through WASAPI (runtime/audio/audio_out.cpp).
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <vector>
 
+#include "../audio/audio_out.h"
 #include "../kernel/kernel.h"
 #include "../kernel/sync.h"
 
 void host_sleep_us(uint64_t us);  // ppc_runtime.cpp: accurate short sleeps
+bool g_audio_mute = false;         // --mute
 
 namespace {
 
@@ -28,7 +33,9 @@ struct Port {
     uint32_t state = STATUS_CLOSE;
     uint64_t channels = 0, blocks = 0, attr = 0;
     uint32_t addr = 0, size = 0;
+    float level = 1.0f;
 };
+constexpr uint64_t PORTATTR_INITLEVEL = 0x1000;
 
 std::mutex g_mutex;
 bool g_init = false;
@@ -38,9 +45,33 @@ uint32_t g_port_mem = 0;
 std::vector<uint64_t> g_keys;
 uint64_t g_ticks = 0;
 
+// One block of a port, big-endian float32 interleaved, mixed into stereo with the PS3 7.1
+// layout (L R C LFE Ls Rs Lb Rb) folded down; LFE is dropped.
+void mix_block(const uint8_t* src, uint64_t channels, float level, float* stereo) {
+    constexpr float k = 0.7071f;
+    for (uint32_t i = 0; i < kBlockSamples; ++i) {
+        float c[8] = {};
+        for (uint64_t ch = 0; ch < channels; ++ch) {
+            uint32_t u = ppc_ld32(src + (i * channels + ch) * 4);
+            memcpy(&c[ch], &u, 4);
+        }
+        float l = c[0], r = c[1];
+        if (channels == 8) {
+            l += k * (c[2] + c[4] + c[6]);
+            r += k * (c[2] + c[5] + c[7]);
+        }
+        stereo[2 * i] += l * level;
+        stereo[2 * i + 1] += r * level;
+    }
+}
+
 void audio_thread() {
     using clock = std::chrono::steady_clock;
     const auto period = std::chrono::nanoseconds(1000000000ull * kBlockSamples / 48000);
+    const bool out = !g_audio_mute && audio_out_open(48000, 2);
+    // debugging aid: DANTE_AUDIO_DUMP=<file> also writes the mix as raw 48 kHz stereo float32
+    FILE* dump = getenv("DANTE_AUDIO_DUMP") ? fopen(getenv("DANTE_AUDIO_DUMP"), "wb") : nullptr;
+    float stereo[2 * kBlockSamples];
     auto next = clock::now();
     for (;;) {
         // Precise 5.33 ms ticks: the game's audio engine advances its stream clock once per
@@ -54,21 +85,35 @@ void audio_thread() {
         else if (now - next > 4 * period)
             next = now;  // fell far behind (debugger, host stall): resync instead of bursting
         std::vector<uint64_t> keys;
+        memset(stereo, 0, sizeof(stereo));
         {
             std::lock_guard<std::mutex> lk(g_mutex);
-            if (!g_init) return;
+            if (!g_init) {
+                if (out) audio_out_close();
+                return;
+            }
             for (uint32_t i = 0; i < kMaxPorts; ++i) {
                 Port& p = g_ports[i];
                 if (!p.open || p.state != STATUS_RUN || !p.blocks) continue;
                 uint32_t ri = g_read_index_addr + 8 * i;
                 uint64_t idx = vm::read64(ri);
-                // consume the block (silence it so stale data is never replayed)
+                // play the block, then silence it so stale data is never replayed
                 uint32_t block_bytes = (uint32_t)(p.channels * kBlockSamples * 4);
-                memset(vm::ptr(p.addr + (uint32_t)(idx % p.blocks) * block_bytes), 0, block_bytes);
+                uint8_t* blk = vm::ptr(p.addr + (uint32_t)(idx % p.blocks) * block_bytes);
+                if (out || dump) mix_block(blk, p.channels, p.level, stereo);
+                memset(blk, 0, block_bytes);
                 vm::write64(ri, (idx + 1) % p.blocks);
             }
             ++g_ticks;
             keys = g_keys;
+        }
+        for (float& v : stereo) v = v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v);
+        if (out) {
+            audio_out_write(stereo, kBlockSamples);
+        }
+        if (dump) {
+            fwrite(stereo, sizeof(stereo), 1, dump);
+            fflush(dump);
         }
         for (uint64_t k : keys)
             if (auto q = event_queue_by_key(k)) q->push(0, 0, 0, 0);
@@ -93,7 +138,11 @@ void audio_perf_report(double seconds) {
             std::lock_guard<std::mutex> lk(q->m);
             backlog += q->events.size();
         }
-    LOG_I("perf", "  audio: %.1f blocks/s (expected 187.5), notify queue backlog %zu", (ticks - last) / seconds, backlog);
+    AudioOutStats o = audio_out_stats();
+    LOG_I("perf", "  audio: %.1f blocks/s (expected 187.5), notify queue backlog %zu; output %s, %u ms buffered, "
+                  "underruns %llu, dropped %llu, padded %llu",
+          (ticks - last) / seconds, backlog, o.active ? "on" : "off", o.buffered_ms, (unsigned long long)o.underruns,
+          (unsigned long long)o.dropped, (unsigned long long)o.padded);
     last = ticks;
 }
 
@@ -109,7 +158,7 @@ HLE_FUNC(cellAudio, cellAudioInit) {
     memset(vm::ptr(g_read_index_addr), 0, 0x1000);
     for (auto& p : g_ports) p = Port{};
     std::thread(audio_thread).detach();
-    LOG_I("audio", "cellAudioInit: mixer clock running (48 kHz, %u-sample blocks), output silent", kBlockSamples);
+    LOG_I("audio", "cellAudioInit: mixer clock running (48 kHz, %u-sample blocks)", kBlockSamples);
     RET(CELL_OK);
 }
 
@@ -136,6 +185,10 @@ HLE_FUNC(cellAudio, cellAudioPortOpen) {
         p.blocks = blocks;
         p.attr = attr;
         p.size = (uint32_t)(ch * blocks * kBlockSamples * 4);
+        if (attr & PORTATTR_INITLEVEL) {
+            uint32_t u = vm::read32(param + 24);
+            memcpy(&p.level, &u, 4);
+        }
         p.addr = g_port_mem + i * 0x40000;
         memset(vm::ptr(p.addr), 0, p.size);
         vm::write64(g_read_index_addr + 8 * i, 0);
@@ -181,6 +234,17 @@ HLE_FUNC(cellAudio, cellAudioPortClose) {
     uint32_t n = ARG32(0);
     if (n >= kMaxPorts || !g_ports[n].open) return (void)RET(CELL_AUDIO_ERROR_PORT_NOT_OPEN);
     g_ports[n] = Port{};
+    RET(CELL_OK);
+}
+
+// cellAudioSetPortLevel(portNum, float level)
+HLE_FUNC(cellAudio, cellAudioSetPortLevel) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    uint32_t n = ARG32(0);
+    if (n >= kMaxPorts || !g_ports[n].open) return (void)RET(CELL_AUDIO_ERROR_PORT_NOT_OPEN);
+    float level = (float)ctx.f[1].f64;
+    if (level < 0.0f) return (void)RET(CELL_AUDIO_ERROR_PARAM);
+    g_ports[n].level = level;
     RET(CELL_OK);
 }
 

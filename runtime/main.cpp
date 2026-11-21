@@ -1,6 +1,6 @@
 // Dante's Inferno PC port - boot.
 //
-// Usage: dante.exe [--game <dump root>] [--user <dir>] [--trace] [--dump-after <seconds>] [--screenshot <frames>] [--input "frame:BUTTON,..."]
+// Usage: dante.exe [--game <dump root>] [--user <dir>] [--trace] [--mute] [--dump-after <seconds>] [--screenshot <frames>] [--input "frame:BUTTON,..."]
 //   <dump root> is the folder containing PS3_GAME/. If omitted, a folder named
 //   "Dante's Inferno" (or any folder containing PS3_GAME/) is searched for next
 //   to and above the executable, then next to and above the current folder.
@@ -68,6 +68,10 @@ int main(int argc, char** argv) {
             g_screenshot_frame = 1;
         } else if (!strcmp(argv[i], "--rsx-debug") && i + 1 < argc) g_rsx_debug = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--spu-profile")) g_spu_profile = true;
+        else if (!strcmp(argv[i], "--mute")) {
+            extern bool g_audio_mute;  // hle/cellAudio.cpp
+            g_audio_mute = true;
+        }
         else if (!strcmp(argv[i], "--no-spu-native")) spu_native_set_enabled(false);
         else if (!strcmp(argv[i], "--perf") && i + 1 < argc) {
             int secs = std::max(1, atoi(argv[++i]));
